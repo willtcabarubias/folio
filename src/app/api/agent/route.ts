@@ -1,0 +1,140 @@
+import { NextResponse } from "next/server";
+import { AIError, MISSING_KEY_MESSAGE, generateStructured, isConfigured, type ChatMessage } from "@/lib/ai/client";
+import { MAX_CLARIFY_ROUNDS, agentSystemPrompt, attachmentsToPromptText } from "@/lib/ai/prompts";
+import { normalizeOutline } from "@/lib/spec/normalize";
+import { AgentResponseSchema, type AgentRequest, type AgentResponse, type Format, type Question } from "@/lib/spec/types";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
+
+const ATTACHMENT_BUDGET = 60_000;
+
+export async function POST(req: Request) {
+  let body: AgentRequest;
+  try {
+    body = (await req.json()) as AgentRequest;
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  const messages = Array.isArray(body.messages) ? body.messages.filter((m) => m && typeof m.content === "string" && m.content.trim()) : [];
+  if (!messages.length) return NextResponse.json({ error: "Message is required" }, { status: 400 });
+  if (!isConfigured()) return NextResponse.json({ error: MISSING_KEY_MESSAGE, code: "missing_key" }, { status: 500 });
+
+  const attachments = (body.attachments ?? []).filter((a) => a && a.text?.trim()).slice(0, 8);
+  const clarifyRounds = messages.filter((m) => m.role === "assistant" && /"kind"\s*:\s*"clarify"/.test(m.content)).length;
+  const hasOutline = Boolean(body.currentOutline);
+
+  const system = agentSystemPrompt({
+    clarifyRounds,
+    hasAttachments: attachments.length > 0,
+    preferredFormat: body.preferredFormat,
+    hasOutline,
+  });
+
+  const convo: ChatMessage[] = messages.slice(-16).map((m) => ({ role: m.role, content: m.content.slice(0, 12_000) }));
+
+  // Context block goes right before the latest user message so it stays salient.
+  const contextParts: string[] = [];
+  if (attachments.length) contextParts.push(`Attached source material:\n${attachmentsToPromptText(attachments, ATTACHMENT_BUDGET)}`);
+  if (body.currentOutline) contextParts.push(`Current outline (source of truth, may include the user's manual edits):\n${JSON.stringify(body.currentOutline)}`);
+  if (contextParts.length) {
+    const lastUser = convo.length - 1;
+    convo[lastUser] = { role: "user", content: `${contextParts.join("\n\n")}\n\n---\nUser message:\n${convo[lastUser].content}` };
+  }
+
+  try {
+    let result = await generateStructured({
+      schema: AgentResponseSchema,
+      system,
+      messages: convo,
+      maxTokens: 6000,
+      temperature: 0.5,
+      label: "Planner",
+    });
+
+    // Hard guarantee: no endless questioning.
+    if (result.kind === "clarify" && clarifyRounds >= MAX_CLARIFY_ROUNDS) {
+      result = await generateStructured({
+        schema: AgentResponseSchema,
+        system,
+        messages: [...convo, { role: "user", content: "Do not ask more questions. Produce the outline now with sensible defaults." }],
+        maxTokens: 6000,
+        temperature: 0.4,
+        label: "Planner",
+      });
+    }
+
+    // Guard: vague file tasks must not be answered inline — force clarify with stepper UI.
+    // Business rule: we are a document generator, not ChatGPT — "explain this" with a file must become a document, not an inline chat answer.
+    const lastUserRaw = messages[messages.length - 1]?.content ?? "";
+    const isVagueFileTask =
+      attachments.length > 0 &&
+      /summar|summry|explain|describe|what.*is.*this|what.*does.*this|what.*say|tell.*about|identify|what.*wrong|what.*issue|critique|review this|extract|find.*(wrong|issue|error|problem)/i.test(lastUserRaw);
+    const isGenericExplainReply =
+      attachments.length > 0 &&
+      result.kind === "reply" &&
+      /happy to help|what would you like me to explain|let me know.*explain|paste the content here/i.test((result as { message: string }).message ?? "");
+    if ((result.kind === "reply" && isVagueFileTask) || isGenericExplainReply) {
+      result = await generateStructured({
+        schema: AgentResponseSchema,
+        system,
+        messages: [
+          ...convo,
+          {
+            role: "user",
+            content:
+              "Your last answer was an inline reply, but the user attached a file and asked a vague file task (summarize / explain this / describe what this is / identify what's wrong / critique / review). You MUST return kind \"clarify\" with 1-2 questions (Q1 focus: Whole document | Key concepts | Section breakdown | Actionable takeaways [ui hybrid, placeholder \"e.g., key concepts\"], Q2 format: Explainer 2-4 pages PDF [Rec] | Study guide | Slide deck [ui radio]) and do NOT explain the file inline. We are a document generator — convert the request into a file. Keep questions few when task is clear.",
+          },
+        ],
+        maxTokens: 6000,
+        temperature: 0.4,
+        label: "Planner-retry-file-task",
+      });
+    }
+
+    const response = finalize(result, body.preferredFormat);
+    return NextResponse.json(response);
+  } catch (err) {
+    const status = err instanceof AIError ? err.status : 500;
+    const message = err instanceof Error ? err.message : "Unexpected error";
+    console.error("[agent]", message);
+    return NextResponse.json({ error: message }, { status });
+  }
+}
+
+function finalize(result: unknown, preferred?: Format | "auto"): AgentResponse {
+  const r = result as { kind: string; message: string; questions?: unknown[]; outline?: unknown };
+  if (r.kind === "clarify") {
+    const questions = (r.questions as { id?: string; question: string; options: string[]; recommended?: string; allowMultiple: boolean; ui?: string; placeholder?: string }[])
+      .map((q, i): Question => {
+        const options = dedupe(q.options.map((o) => o.trim()).filter(Boolean)).slice(0, 6);
+        const recommended = q.recommended && options.includes(q.recommended) ? q.recommended : options[0];
+        const uiRaw = typeof q.ui === "string" ? q.ui.toLowerCase().trim() : undefined;
+        const ui = uiRaw === "radio" || uiRaw === "checkbox" || uiRaw === "text" || uiRaw === "hybrid" ? (uiRaw as Question["ui"]) : undefined;
+        // infer ui from allowMultiple when not provided: multi → checkbox, single+options→ hybrid (options + Other field), no options→ text
+        const inferredUi: Question["ui"] = ui ?? (options.length === 0 ? "text" : q.allowMultiple ? "checkbox" : "hybrid");
+        return { id: q.id?.trim() || `q${i + 1}`, question: q.question.trim(), options, recommended, allowMultiple: q.allowMultiple, ui: inferredUi, placeholder: typeof q.placeholder === "string" && q.placeholder.trim() ? q.placeholder.trim().slice(0, 80) : undefined };
+      })
+      .filter((q) => q.question);
+    if (!questions.length) return { kind: "reply", message: r.message || "Tell me a bit more about what you need." };
+    return { kind: "clarify", message: r.message || "A couple of quick questions to shape this well:", questions };
+  }
+  if (r.kind === "outline") {
+    const o = r.outline as Parameters<typeof normalizeOutline>[0];
+    if (preferred && preferred !== "auto") o.format = preferred;
+    const outline = normalizeOutline(o);
+    return { kind: "outline", message: r.message || "Here is the outline. Edit anything, then generate.", outline };
+  }
+  return { kind: "reply", message: r.message || "How can I help?" };
+}
+
+function dedupe(list: string[]): string[] {
+  const seen = new Set<string>();
+  return list.filter((x) => {
+    const k = x.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
