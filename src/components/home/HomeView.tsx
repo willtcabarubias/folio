@@ -147,8 +147,9 @@ export function HomeView() {
             <div className="h-[200px] max-h-[28dvh] md:h-[260px] w-full shrink-0 invisible" aria-hidden="true" />
           </div>
 
-          {/* Quick starts — pyramid 1 · 2 · 3, longest (Report slides) at top */}
-          <div className="flex w-full max-w-[360px] shrink-0 flex-col items-center gap-2 self-center md:max-w-[360px] md:gap-1">
+          {/* Mobile: pyramid 1 · 2 · 3 (Report slides top) — Desktop: original 2 · 4 */}
+          {/* Mobile only */}
+          <div className="flex w-full max-w-[360px] shrink-0 flex-col items-center gap-2 self-center md:hidden">
             {(() => {
               const first = QUICK_STARTS[2];
               const rest = [QUICK_STARTS[0], QUICK_STARTS[1], QUICK_STARTS[3], QUICK_STARTS[4], QUICK_STARTS[5]];
@@ -163,13 +164,13 @@ export function HomeView() {
                         setPreferredFormat(first.format);
                         setInput(first.prompt);
                       }}
-                      className="btn-secondary h-8 max-w-[200px] flex-1 justify-center gap-1.5 px-4 text-[11px] md:h-[26px] md:max-w-[184px] md:gap-1 md:px-3 md:text-[10px] md:leading-none"
+                      className="btn-secondary h-8 max-w-[200px] flex-1 justify-center gap-1.5 px-4 text-[11px] leading-none"
                     >
-                      <Icon0 size={12} className="shrink-0 text-ink md:h-[11px] md:w-[11px]" />
+                      <Icon0 size={12} className="shrink-0 text-ink" />
                       <span className="truncate">{first.label}</span>
                     </button>
                   </div>
-                  <div className="grid w-full grid-cols-2 gap-2 md:gap-1">
+                  <div className="grid w-full grid-cols-2 gap-2">
                     {rest.slice(0, 2).map(({ icon: Icon, label, prompt, format }) => (
                       <button
                         key={label}
@@ -178,14 +179,14 @@ export function HomeView() {
                           setPreferredFormat(format);
                           setInput(prompt);
                         }}
-                        className="btn-secondary h-8 w-full justify-center gap-1.5 px-3 text-[11px] md:h-[26px] md:gap-1 md:px-2.5 md:text-[10px] md:leading-none"
+                        className="btn-secondary h-8 w-full justify-center gap-1.5 px-3 text-[11px] leading-none"
                       >
-                        <Icon size={12} className="shrink-0 text-ink md:h-[11px] md:w-[11px]" />
+                        <Icon size={12} className="shrink-0 text-ink" />
                         <span className="min-w-0 truncate">{label}</span>
                       </button>
                     ))}
                   </div>
-                  <div className="grid w-full grid-cols-3 gap-2 md:gap-1">
+                  <div className="flex w-full flex-wrap justify-center gap-2">
                     {rest.slice(2).map(({ icon: Icon, label, prompt, format }) => (
                       <button
                         key={label}
@@ -194,16 +195,51 @@ export function HomeView() {
                           setPreferredFormat(format);
                           setInput(prompt);
                         }}
-                        className="btn-secondary h-8 w-full justify-center gap-1 px-2 text-[11px] md:h-[26px] md:gap-1 md:px-2 md:text-[10px] md:leading-none"
+                        className="btn-secondary h-8 w-auto justify-center gap-1.5 whitespace-nowrap px-3.5 text-[11px] leading-none"
                       >
-                        <Icon size={12} className="shrink-0 text-ink md:h-[11px] md:w-[11px]" />
-                        <span className="min-w-0 truncate">{label}</span>
+                        <Icon size={12} className="shrink-0 text-ink" />
+                        <span>{label}</span>
                       </button>
                     ))}
                   </div>
                 </>
               );
             })()}
+          </div>
+          {/* Desktop: original layout 2 on top, 4 below */}
+          <div className="hidden shrink-0 flex-col items-center gap-1 md:flex">
+            <div className="flex flex-wrap justify-center gap-1">
+              {QUICK_STARTS.slice(0, 2).map(({ icon: Icon, label, prompt, format }) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => {
+                    setPreferredFormat(format);
+                    setInput(prompt);
+                  }}
+                  className="btn-secondary h-[26px] w-[124px] justify-center gap-1 px-2.5 text-[10px] leading-none"
+                >
+                  <Icon size={12} className="h-[11px] w-[11px] shrink-0 text-ink" />
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-wrap justify-center gap-1">
+              {QUICK_STARTS.slice(2).map(({ icon: Icon, label, prompt, format }) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => {
+                    setPreferredFormat(format);
+                    setInput(prompt);
+                  }}
+                  className="btn-secondary h-[26px] w-[124px] justify-center gap-1 px-2.5 text-[10px] leading-none"
+                >
+                  <Icon size={12} className="h-[11px] w-[11px] shrink-0 text-ink" />
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>

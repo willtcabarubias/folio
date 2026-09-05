@@ -88,14 +88,14 @@ export function BoltPromptBox({
   useEffect(() => {
     const ta = textareaRef.current
     if (!ta) return
-    if (hero) {
-      ta.style.height = '56px'
-      ta.style.overflowY = ta.scrollHeight > 56 ? 'auto' : 'hidden'
-    } else {
-      ta.style.height = 'auto'
-      ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`
-      ta.style.overflowY = ta.scrollHeight > 160 ? 'auto' : 'hidden'
-    }
+    const base = hero ? 56 : 44
+    const cap = hero ? 180 : 160
+    ta.style.height = 'auto'
+    const raw = ta.scrollHeight
+    const isMultiline = raw > base + 8
+    const target = isMultiline ? Math.min(raw * 1.15, cap) : Math.min(raw, cap)
+    ta.style.height = `${Math.max(base, target)}px`
+    ta.style.overflowY = (isMultiline ? raw * 1.15 : raw) > cap ? 'auto' : 'hidden'
   }, [value, hero])
 
   useEffect(() => {
@@ -171,7 +171,7 @@ export function BoltPromptBox({
             placeholder={placeholder ?? 'What do you want to build?'}
             disabled={busy}
             className={`block w-full resize-none border-0 bg-transparent text-white outline-none placeholder:text-white/30 scroll-thin overflow-y-auto ${hero ? 'px-2 py-1.5 text-[16px] leading-6 md:px-1.5 md:py-1 md:text-[14px]' : 'px-2 py-1.5 text-[15px] leading-6 md:text-[13px]'}`}
-            style={{ minHeight: hero ? '56px' : '44px', maxHeight: hero ? '56px' : '160px' }}
+            style={{ minHeight: hero ? '56px' : '44px', maxHeight: hero ? '180px' : '160px' }}
           />
         </div>
 

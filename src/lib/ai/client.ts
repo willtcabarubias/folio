@@ -228,16 +228,18 @@ async function chatCompletionZen(opts: CompletionOptions, apiModel: string): Pro
     }
     return { role: m.role as "user" | "assistant" | "system", content: m.content };
   });
-  // Muse Spark reasoning is expensive — use low effort and ensure enough output tokens for reasoning + JSON
+  // Fix for Zen hitting max_output_tokens with reasoning-only output: use minimal reasoning + large headroom for JSON
   const requestedMax = opts.maxTokens ?? 4096;
-  // For structured JSON tasks, ensure at least 8000 to avoid truncation (reasoning can consume 4k+)
-  const maxOut = opts.json ? Math.max(requestedMax, 8000) : Math.max(requestedMax, 2000);
+  // Reserve ~6k for reasoning headroom; guarantee place for JSON (Spark tier max ~16k). 16000 is safe max (cost ≈14k) vs 8000 which fills with reasoning.
+  const maxOut = opts.json ? Math.max(requestedMax + 6000, 16000) : Math.max(requestedMax, 4000);
+  // minimal caps reasoning ~1k vs low ~5k — leaves budget for output
+  const effort = opts.json ? ("minimal" as const) : ("low" as const);
   const body: Record<string, unknown> = {
     model: apiModel,
     input,
     max_output_tokens: maxOut,
     temperature: opts.temperature ?? 0.5,
-    reasoning: { effort: "low" },
+    reasoning: { effort },
     stream: false,
   };
   if (opts.json) (body as any).text = { format: { type: "json_object" } };
@@ -291,10 +293,14 @@ async function chatCompletionZen(opts: CompletionOptions, apiModel: string): Pro
     else if (data.output[0]?.content?.[0]?.text) content = data.output[0].content[0].text;
   }
   if (!content) content = (data as any).choices?.[0]?.message?.content ?? (data as any).output?.[0]?.content?.[0]?.text ?? (data as any).choices?.[0]?.text ?? "";
-  if (!content || !String(content).trim()) throw new AIError(`Zen returned empty response: ${JSON.stringify(data).slice(0, 800)}`, 502);
+  // If model hit max_output_tokens with only reasoning (common on 8000 budget), expose a retryable signal instead of opaque empty
+  const isIncompleteMax = (data as any)?.status === "incomplete" && (data as any)?.incomplete_details?.reason === "max_output_tokens";
+  if (!content || !String(content).trim()) {
+    if (isIncompleteMax) throw new AIError(`RETRYABLE_MAX_TOKENS: Zen hit max_output_tokens (${maxOut}) with reasoning-only output. Retry with larger budget/minimal reasoning. Raw: ${JSON.stringify(data).slice(0, 600)}`, 502);
+    throw new AIError(`Zen returned empty response: ${JSON.stringify(data).slice(0, 800)}`, 502);
+  }
   let str = stripThinking(String(content));
-  // handle finish length for json
-  if ((data as any).incomplete_details?.reason === "max_output_tokens" && opts.json) {
+  if (isIncompleteMax && opts.json) {
     const fixed = tryExtractJSON(str);
     if (!fixed) throw new AIError("Zen response was cut off. Try a shorter document.", 502);
   }
@@ -413,8 +419,10 @@ export async function generateStructured<T>(opts: StructuredOptions<T>): Promise
         temperature: attempt === 0 ? opts.temperature : Math.max(0.1, (opts.temperature ?? 0.5) - 0.2),
       });
     } catch (err) {
-      if (err instanceof AIError && (err.status === 429 || err.status === 503) && attempt < retries) {
-        await new Promise((r) => setTimeout(r, 1500));
+      const msg = err instanceof Error ? err.message : "";
+      const isRetryable = err instanceof AIError && (err.status === 429 || err.status === 503 || msg.includes("RETRYABLE_MAX_TOKENS"));
+      if (isRetryable && attempt < retries) {
+        await new Promise((r) => setTimeout(r, isRetryable && msg.includes("RETRYABLE_MAX_TOKENS") ? 800 : 1500));
         lastError = err.message;
         lastRaw = "";
         continue;
