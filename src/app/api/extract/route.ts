@@ -29,6 +29,8 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not read this file";
-    return NextResponse.json({ error: message }, { status: 422 });
+    const stack = err instanceof Error ? err.stack : undefined;
+    console.error("[extract]", message, stack);
+    return NextResponse.json({ error: message, details: stack?.slice(0, 3000), stack: stack?.slice(0, 4000) }, { status: 422 });
   }
 }

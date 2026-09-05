@@ -2,39 +2,89 @@ import type { AgentRequest, AgentResponse, Attachment, DocumentSpec, ExpandReque
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  url?: string;
+  method?: string;
+  details?: string;
+  constructor(message: string, status: number, opts?: { url?: string; method?: string; details?: string }) {
     super(message);
     this.status = status;
+    this.url = opts?.url;
+    this.method = opts?.method;
+    this.details = opts?.details;
   }
 }
 
 async function readError(res: Response, fallback: string): Promise<never> {
   let message = fallback;
+  let details: string | undefined;
+  const url = res.url;
+  const hint =
+    res.status === 504
+      ? "Vercel Hobby timeout (10s). Try a shorter document, fewer slides, or retry – the function was killed after 10s."
+      : res.status === 413
+        ? "Payload too large."
+        : undefined;
   try {
-    const data = (await res.json()) as { error?: string };
-    if (data?.error) message = data.error;
+    const ct = res.headers.get("content-type") ?? "";
+    if (ct.includes("application/json")) {
+      const data = (await res.json()) as { error?: string; details?: string; stack?: string };
+      if (data?.error) message = data.error;
+      if (data?.details || data?.stack) details = [data.details, data.stack].filter(Boolean).join("\n");
+    } else {
+      const text = (await res.text()).slice(0, 4000);
+      if (text) {
+        // Vercel 504 returns HTML; preserve snippet
+        details = text;
+        if (!text.includes(fallback) && text.length < 500) message = `${fallback}: ${text.slice(0, 200)}`;
+        if (res.status === 504 && text.toLowerCase().includes("timeout")) {
+          message = `${fallback} — timeout (504). Free tier 10s limit. ${hint ?? ""}`.trim();
+        }
+      }
+    }
   } catch {
     /* ignore */
   }
-  throw new ApiError(message, res.status);
+  const err = new ApiError(hint ? `${message} — ${hint}` : message, res.status, {
+    url,
+    method: "POST",
+    details: details ?? hint,
+  });
+  // attach hint for modal auto-open caller to use verbatim
+  (err as unknown as Record<string, unknown>).hint = hint;
+  throw err;
 }
 
 export async function extractFile(file: File): Promise<Omit<Attachment, "id" | "status">> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch("/api/extract", { method: "POST", body: form });
+  let res: Response;
+  try {
+    res = await fetch("/api/extract", { method: "POST", body: form });
+  } catch (e) {
+    throw new ApiError(e instanceof Error ? e.message : "Network error while reading file", 0, { url: "/api/extract", method: "POST" });
+  }
   if (!res.ok) await readError(res, "Could not read this file");
   return (await res.json()) as Omit<Attachment, "id" | "status">;
 }
 
 export async function askAgent(payload: AgentRequest): Promise<AgentResponse> {
-  const res = await fetch("/api/agent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  let res: Response;
+  try {
+    res = await fetch("/api/agent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  } catch (e) {
+    throw new ApiError(e instanceof Error ? e.message : "Network error – assistant unreachable", 0, { url: "/api/agent", method: "POST" });
+  }
   if (!res.ok) await readError(res, "The assistant is unavailable right now");
   return (await res.json()) as AgentResponse;
 }
 
 export async function expandOutline(payload: ExpandRequest): Promise<{ spec: DocumentSpec; warnings: string[]; fit: FitInfo | null }> {
-  const res = await fetch("/api/expand", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  let res: Response;
+  try {
+    res = await fetch("/api/expand", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  } catch (e) {
+    throw new ApiError(e instanceof Error ? e.message : "Network error while expanding", 0, { url: "/api/expand", method: "POST" });
+  }
   if (!res.ok) await readError(res, "Could not write the document content");
   return (await res.json()) as { spec: DocumentSpec; warnings: string[]; fit: FitInfo | null };
 }
@@ -46,11 +96,16 @@ export type ExpandStreamEvent =
   | { type: "error"; error: string };
 
 export async function* expandOutlineStream(payload: ExpandRequest): AsyncGenerator<ExpandStreamEvent, void, unknown> {
-  const res = await fetch("/api/expand?stream=1", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify(payload),
-  });
+  let res: Response;
+  try {
+    res = await fetch("/api/expand?stream=1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    throw new ApiError(e instanceof Error ? e.message : "Network error while streaming", 0, { url: "/api/expand?stream=1", method: "POST" });
+  }
   if (!res.ok) await readError(res, "Could not write the document content");
   const reader = res.body?.getReader();
   if (!reader) throw new ApiError("Streaming not supported", 500);
@@ -80,7 +135,12 @@ export async function* expandOutlineStream(payload: ExpandRequest): AsyncGenerat
 }
 
 export async function renderFile(spec: DocumentSpec, format: Format): Promise<{ blob: Blob; fileName: string }> {
-  const res = await fetch("/api/render", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec, format }) });
+  let res: Response;
+  try {
+    res = await fetch("/api/render", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec, format }) });
+  } catch (e) {
+    throw new ApiError(e instanceof Error ? e.message : "Network error while rendering", 0, { url: "/api/render", method: "POST", details: String(e) });
+  }
   if (!res.ok) await readError(res, `Could not render the ${format.toUpperCase()}`);
   const blob = await res.blob();
   const fileName = res.headers.get("X-File-Name") || `document.${format}`;
@@ -89,7 +149,12 @@ export async function renderFile(spec: DocumentSpec, format: Format): Promise<{ 
 
 /** PDF twin of the given format, for on-screen preview and image export. */
 export async function renderPreview(spec: DocumentSpec, format: Format): Promise<ArrayBuffer> {
-  const res = await fetch("/api/render", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec, format, preview: true }) });
+  let res: Response;
+  try {
+    res = await fetch("/api/render", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec, format, preview: true }) });
+  } catch (e) {
+    throw new ApiError(e instanceof Error ? e.message : "Network error while previewing", 0, { url: "/api/render?preview=1", method: "POST", details: String(e) });
+  }
   if (!res.ok) await readError(res, "Could not render the preview");
   return res.arrayBuffer();
 }
@@ -120,6 +185,42 @@ export function safeName(title: string): string {
       .replace(/^-+|-+$/g, "")
       .slice(0, 60) || "document"
   );
+}
+
+/** Push ApiError into global log for debugging (auto-opens modal). Emits event consumed by ErrorProvider. */
+export function reportApiError(err: unknown, fallback: string, source: import("@/lib/error/types").ErrorSource) {
+  try {
+    const detail =
+      err instanceof ApiError
+        ? {
+            source,
+            severity: "error" as const,
+            message: err.message || fallback,
+            status: err.status || undefined,
+            url: err.url,
+            method: err.method,
+            details: err.details,
+            stack: err.stack,
+            hint: (err as unknown as { hint?: string }).hint,
+          }
+        : err instanceof Error
+          ? {
+              source,
+              severity: "error" as const,
+              message: err.message || fallback,
+              stack: err.stack,
+              details: String(err).slice(0, 3000),
+            }
+          : {
+              source,
+              severity: "error" as const,
+              message: fallback,
+              details: String(err).slice(0, 3000),
+            };
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("folio:push-error", { detail }));
+    }
+  } catch {}
 }
 
 /** Plain Markdown rendition of the generated content. */

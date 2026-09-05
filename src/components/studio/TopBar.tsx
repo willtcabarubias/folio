@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronDown, Copy, Download, FileImage, FileText, House, LayoutList, Link2, Loader2, Presentation, Save, ScanEye, Share2, Type } from "lucide-react";
+import { Bug, Check, ChevronDown, Copy, Download, FileImage, FileText, House, LayoutList, Link2, Loader2, Presentation, Save, ScanEye, Share2, Type } from "lucide-react";
+import { useErrorLog } from "@/lib/error/store";
 
 export type ExportKind = "pptx" | "docx" | "pdf" | "png" | "md";
 export type ShareKind = "link" | "file" | "text";
@@ -25,6 +26,8 @@ type Props = {
 };
 
 export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exporting, onExport, onShare, canShareFile, status, isPlanning, isBusy, centerLabel }: Props) {
+  const { errors, hasUnread, open } = useErrorLog();
+  const errCount = errors.length;
   if (isPlanning) {
     return (
       <header className="relative z-20 flex h-14 shrink-0 items-center justify-between gap-3 border-b border-line/40 bg-white px-3 backdrop-blur md:h-12 md:px-4">
@@ -34,13 +37,27 @@ export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exp
             <circle cx="25" cy="24" r="3.5" fill="#111311" />
           </svg>
         </Link>
-        <Link
-          href="/"
-          aria-label="Home"
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink transition hover:bg-[#f4f6f4] md:h-[32px] md:w-[32px]"
-        >
-          <House size={18} className="md:h-4 md:w-4" />
-        </Link>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={open}
+            aria-label={errCount ? `Open error log, ${errCount} errors` : "Open error log"}
+            className={`relative flex h-9 w-9 items-center justify-center rounded-full transition md:h-[32px] md:w-[32px] ${hasUnread ? "bg-red-600 text-white hover:bg-red-700" : "text-ink hover:bg-[#f4f6f4]"} ${errCount && !hasUnread ? "ring-1 ring-line" : ""}`}
+            title={errCount ? `${errCount} error${errCount > 1 ? "s" : ""} — open log` : "Error log — no errors"}
+          >
+            <Bug size={18} className="md:h-4 md:w-4" />
+            {errCount > 0 ? (
+              <span className="absolute -right-0.5 -top-0.5 flex min-h-[16px] min-w-[16px] items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-white">{errCount > 99 ? "99+" : errCount}</span>
+            ) : null}
+          </button>
+          <Link
+            href="/"
+            aria-label="Home"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink transition hover:bg-[#f4f6f4] md:h-[32px] md:w-[32px]"
+          >
+            <House size={18} className="md:h-4 md:w-4" />
+          </Link>
+        </div>
       </header>
     );
   }
@@ -89,6 +106,19 @@ export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exp
       {showActions && (
         <div className="flex shrink-0 items-center gap-1.5 md:gap-1">
           {status && <span className="hidden md:inline-flex">{status}</span>}
+          <button
+            type="button"
+            onClick={open}
+            aria-label={errCount ? `Open error log, ${errCount} errors` : "Open error log"}
+            className={`relative flex h-9 w-9 items-center justify-center rounded-full transition md:h-[31px] md:w-[31px] ${hasUnread ? "bg-red-600 text-white hover:bg-red-700" : "bg-white text-ink ring-1 ring-line hover:bg-slate-50"} ${busy ? "opacity-60" : ""}`}
+            title={errCount ? `${errCount} error${errCount > 1 ? "s" : ""} — open log` : "Error log — no errors"}
+          >
+            <Bug size={15} className="md:h-3.5 md:w-3.5" />
+            {errCount > 0 ? (
+              <span className="absolute -right-1 -top-1 flex min-h-[16px] min-w-[16px] items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-white">{errCount > 99 ? "99+" : errCount}</span>
+            ) : null}
+            {hasUnread ? <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-white ring-2 ring-red-600" aria-hidden="true" /> : null}
+          </button>
           <button
             type="button"
             onClick={onSave}

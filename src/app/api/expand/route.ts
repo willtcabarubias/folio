@@ -79,8 +79,9 @@ export async function POST(req: Request) {
           send({ type: "done", spec, warnings: failures, fit: spec.fit ?? null });
         } catch (err) {
           const message = err instanceof Error ? err.message : "Unexpected error";
-          console.error("[expand-stream]", message);
-          send({ type: "error", error: message });
+          const stack = err instanceof Error ? err.stack : undefined;
+          console.error("[expand-stream]", message, stack);
+          send({ type: "error", error: message, details: stack?.slice(0, 3000) } as unknown);
         } finally {
           controller.close();
         }
@@ -119,8 +120,9 @@ export async function POST(req: Request) {
   } catch (err) {
     const status = err instanceof AIError ? err.status : 500;
     const message = err instanceof Error ? err.message : "Unexpected error";
-    console.error("[expand]", message);
-    return NextResponse.json({ error: message }, { status });
+    const stack = err instanceof Error ? err.stack : undefined;
+    console.error("[expand]", message, stack);
+    return NextResponse.json({ error: message, details: stack?.slice(0, 3000), stack: stack?.slice(0, 4000) }, { status });
   }
 }
 

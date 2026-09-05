@@ -1,6 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
+import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
+import { ErrorLogModal } from "@/components/ui/ErrorLogModal";
+import { ErrorProvider, ErrorProviderBridge } from "@/lib/error/store";
 
 export const metadata: Metadata = {
   title: "Folio — AI decks and documents",
@@ -21,7 +24,15 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
       </head>
-      <body className="antialiased">{children}</body>
+      <body className="antialiased">
+        <ErrorProvider>
+          <ErrorProviderBridge />
+          <ErrorBoundary>
+            {children}
+            <ErrorLogModal />
+          </ErrorBoundary>
+        </ErrorProvider>
+      </body>
     </html>
   );
 }

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Bot, Check, Loader2, MessageSquare, Paperclip, ScanEye, Sparkles } from "lucide-react";
-import { ApiError, askAgent, downloadBlob, expandOutline, expandOutlineStream, extractFile, renderFile, renderPreview, safeName, specToMarkdown } from "@/lib/client/api";
+import { ApiError, askAgent, downloadBlob, expandOutline, expandOutlineStream, extractFile, renderFile, renderPreview, reportApiError, safeName, specToMarkdown } from "@/lib/client/api";
 import { rasterizePdf } from "@/lib/client/pdf";
 import type { AgentResponse, Attachment, ChatTurn, DocumentSpec, Format, Outline } from "@/lib/spec/types";
 import { getProject, newId, saveProject, type Project } from "@/lib/store/projects";
@@ -185,6 +185,7 @@ export function Builder({ id }: { id: string }) {
         const result = await extractFile(file);
         setAttachments((prev) => prev.map((a) => (a.id === fid ? { ...a, ...result, status: "ready" } : a)));
       } catch (err) {
+        reportApiError(err, "Could not read this file", "api:extract");
         const message = err instanceof Error ? err.message : "Could not read this file";
         setAttachments((prev) => prev.map((a) => (a.id === fid ? { ...a, status: "error", error: message } : a)));
       }
@@ -207,8 +208,29 @@ export function Builder({ id }: { id: string }) {
     try {
       const data = await renderPreview(s, format);
       setPreview({ data, format });
+      return true;
     } catch (err) {
-      setGen({ status: "error", message: err instanceof Error ? err.message : "Preview failed" });
+      reportApiError(err, "Preview failed", "client:preview");
+      // Do NOT clobber a successful deck into error if spec already renders (cards visible).
+      // Keep the editable deck usable; surface error in global log instead of ghost Regenerate overlay.
+      const isTimeout = err instanceof ApiError && (err.status === 504 || err.status === 408);
+      const msg = err instanceof Error ? err.message : "Preview failed";
+      // Only mark generation as error if we are still in writing/rendering phase without a spec.
+      // For restore-path, keep ready and show toast instead.
+      setGen((prev) => {
+        if (prev.status === "rendering" || prev.status === "writing") {
+          // Caller (doGenerate) will decide; don't force error here for timeout – let caller keep ready with warning.
+          if (isTimeout && s.blocks.length > 0) return { status: "ready", warnings: [msg] } as unknown as typeof prev;
+          return { status: "error", message: msg };
+        }
+        // Already ready – keep ready, just warn
+        return prev;
+      });
+      if (isTimeout) {
+        // Non-blocking: deck stays
+        return false;
+      }
+      return false;
     } finally {
       setPreviewBusy(false);
     }
@@ -283,10 +305,17 @@ export function Builder({ id }: { id: string }) {
       const produced = finalSpec;
       specKey.current = fingerprint(targetOutline);
       setGen({ status: "rendering" });
-      await loadPreview(produced, target.format);
+      // Preview may 504 on Hobby (10s). Don't lose the deck – keep spec and mark ready with warning.
+      const previewOk = await loadPreview(produced, target.format);
       setSpec(produced);
-      setGen({ status: "ready", pages: produced.fit?.pages, targetPages: produced.targetPages, fitted: produced.fit?.fitted, trimmed: produced.fit?.trimmed, warnings });
-      showToast("Preview updated");
+      if (!previewOk) {
+        // Check if loadPreview already pushed - keep ready but surface warning in log
+        setGen({ status: "ready", pages: produced.fit?.pages, targetPages: produced.targetPages, fitted: produced.fit?.fitted, trimmed: produced.fit?.trimmed, warnings: [...warnings, "Preview timed out (Vercel Hobby 10s) – deck is still usable. Export may hit same limit."] });
+        showToast("Deck ready – preview hit Hobby timeout, see error log");
+      } else {
+        setGen({ status: "ready", pages: produced.fit?.pages, targetPages: produced.targetPages, fitted: produced.fit?.fitted, trimmed: produced.fit?.trimmed, warnings });
+        showToast("Preview updated");
+      }
       if (autoGenPending.current && doGenerateRef.current) {
         const pending = autoGenPending.current;
         autoGenPending.current = null;
@@ -300,6 +329,7 @@ export function Builder({ id }: { id: string }) {
         }, 250);
       }
     } catch (err) {
+      reportApiError(err, "Generation failed", "api:expand");
       setGen({ status: "error", message: err instanceof Error ? err.message : "Generation failed" });
       showToast(err instanceof Error ? err.message : "Generation failed");
     }
@@ -374,6 +404,7 @@ export function Builder({ id }: { id: string }) {
           setMessages((prev) => [...prev, newAssistant]);
         }
       } catch (err) {
+        reportApiError(err, "Agent error", "api:agent");
         const message = err instanceof ApiError || err instanceof Error ? err.message : "Something went wrong";
         setMessages((prev) => [...prev, { id: newId("e"), role: "assistant", text: message, error: true }]);
       } finally {
@@ -484,6 +515,7 @@ export function Builder({ id }: { id: string }) {
       }
       showToast("Export ready");
     } catch (err) {
+      reportApiError(err, "Export failed", kind === "png" ? "client:preview" : "api:render");
       showToast(err instanceof Error ? err.message : "Export failed");
     } finally {
       setExporting(null);
@@ -514,6 +546,7 @@ export function Builder({ id }: { id: string }) {
       }
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
+      reportApiError(err, "Could not share", "api:render");
       showToast(err instanceof Error ? err.message : "Could not share");
     }
   };
@@ -633,11 +666,22 @@ export function Builder({ id }: { id: string }) {
                 {spec ? (
                   <>
                     <EditablePreview spec={spec} onChange={handleSpecChange} busy={generating || previewBusy || busy} streaming={gen.status === "writing"} />
-                    {gen.status === "error" && (
+                    {gen.status === "error" && (!spec || spec.blocks.length === 0) && (
                       <div className="pointer-events-none absolute inset-x-0 bottom-6 flex justify-center">
                         <button type="button" onClick={generate} className="pointer-events-auto btn-primary shadow-float">
                           Regenerate
                         </button>
+                      </div>
+                    )}
+                    {gen.status === "error" && spec && spec.blocks.length > 0 && (
+                      <div className="absolute inset-x-0 bottom-0 flex justify-center p-3">
+                        <div className="flex items-center gap-2 rounded-full bg-white px-4 py-2 text-xs font-medium text-ink shadow-float ring-1 ring-line">
+                          <AlertCircle size={14} className="text-danger" />
+                          <span className="max-w-[260px] truncate">{gen.message}</span>
+                          <button type="button" onClick={generate} className="btn-primary h-7 px-3 text-xs">
+                            Regenerate
+                          </button>
+                        </div>
                       </div>
                     )}
                   </>

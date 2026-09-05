@@ -98,8 +98,9 @@ export async function POST(req: Request) {
   } catch (err) {
     const status = err instanceof AIError ? err.status : 500;
     const message = err instanceof Error ? err.message : "Unexpected error";
-    console.error("[agent]", message);
-    return NextResponse.json({ error: message }, { status });
+    const stack = err instanceof Error ? err.stack : undefined;
+    console.error("[agent]", message, stack);
+    return NextResponse.json({ error: message, details: stack?.slice(0, 3000), stack: stack?.slice(0, 4000) }, { status });
   }
 }
 

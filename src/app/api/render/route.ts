@@ -86,7 +86,21 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Render failed";
-    console.error("[render]", format, message);
-    return NextResponse.json({ error: `Could not render ${format.toUpperCase()}: ${message}` }, { status: 500 });
+    const stack = err instanceof Error ? err.stack : undefined;
+    const cause = err instanceof Error ? (err as unknown as { cause?: unknown }).cause : undefined;
+    console.error("[render]", format, message, stack, cause);
+    // Return rich payload for global error modal (client auto-opens)
+    return NextResponse.json(
+      {
+        error: `Could not render ${format.toUpperCase()}: ${message}`,
+        details: cause ? String(cause).slice(0, 2000) : undefined,
+        stack: stack?.slice(0, 4000),
+        hint:
+          message.toLowerCase().includes("timeout") || message.toLowerCase().includes("504")
+            ? "Vercel Hobby free tier kills functions after ~10s. Try a shorter document or fewer slides, or upgrade."
+            : undefined,
+      },
+      { status: 500 },
+    );
   }
 }
