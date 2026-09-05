@@ -47,7 +47,7 @@ function FormatSelector({
 // Preserves Folio Props API (value/onChange/onSubmit/onFiles/attachments/busy etc)
 // but renders with bolt dark aesthetic on sage canvas
 
-const ACCEPT = '.pdf,.docx,.pptx,.txt,.md,.markdown,.csv,.tsv,.json,.html,.htm'
+const ACCEPT = '.pdf,.docx,.pptx,.txt,.md,.markdown,.csv,.tsv,.json,.html,.htm,.png,.jpg,.jpeg,.webp,.gif,.bmp'
 
 type BoltPromptBoxProps = {
   value: string
@@ -195,12 +195,12 @@ export function BoltPromptBox({
                   onClick={() => fileRef.current?.click()}
                   className="group flex items-center gap-2 rounded-full bg-white/[0.08] px-2.5 py-1.5 pr-3 ring-1 ring-white/10 backdrop-blur-sm transition hover:bg-white/[0.12] hover:ring-white/15 md:gap-1.5 md:px-2 md:py-1 md:pr-2.5"
                   aria-label="Attach file"
-                  title="Attach PDF, DOCX, PPTX, TXT, MD or CSV"
+                  title="Attach PDF, DOCX, PPTX, TXT, MD, CSV or image (PNG, JPG, WEBP)"
                 >
                   <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white text-ink shadow-sm transition group-hover:scale-105 md:h-5 md:w-5">
                     <Paperclip size={13} strokeWidth={1.9} className="md:h-3 md:w-3" />
                   </span>
-                  <span className="text-xs font-medium tracking-tight text-white/80 group-hover:text-white md:text-[11px]">attach file</span>
+                  <span className="hidden text-xs font-medium tracking-tight text-white/80 group-hover:text-white md:inline md:text-[11px]">attach file</span>
                 </button>
               </>
             )}

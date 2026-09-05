@@ -26,6 +26,7 @@ function sanitize(spec: DocumentSpec, format: Format): DocumentSpec {
     pageSize: spec.pageSize === "Letter" ? "Letter" : "A4",
     theme: spec.theme || DEFAULT_THEME,
     format: spec.format || format,
+    originFormat: (spec as any).originFormat || (spec.format as Format) || format,
     blocks: spec.blocks.map((b, i) => ({ ...b, id: b.id || `b${i + 1}`, bullets: Array.isArray(b.bullets) ? b.bullets : [], title: b.title || "" })),
   };
 }
@@ -54,7 +55,19 @@ export async function POST(req: Request) {
 
   try {
     let spec = sanitize(body.spec, format);
-    if (spec.format !== format) spec = await redesign(spec, format);
+    // Export lock: pptx→pptx/pdf (pdf keeps slide size), docx/pdf → docx/pdf
+    const origin = (spec as any).originFormat as Format | undefined;
+    const allow: Record<Format, Format[]> = {
+      pptx: ["pptx", "pdf"],
+      docx: ["docx", "pdf"],
+      pdf: ["pdf", "docx"],
+    };
+    if (origin && !allow[origin].includes(format)) {
+      return NextResponse.json({ error: `This document was created as ${origin.toUpperCase()} and can only be exported as ${allow[origin].join("/").toUpperCase()}.` }, { status: 403 });
+    }
+    // Keep slide geometry for pptx→pdf (no reflow): use slide PDF, not document reflow
+    const isSameSlidePdf = origin === "pptx" && format === "pdf";
+    if (!isSameSlidePdf && spec.format !== format) spec = await redesign(spec, format);
 
     if (body.preview) {
       const buffer = format === "pptx" ? await renderSlidesPdf(spec) : await renderPdf(spec);
@@ -71,7 +84,9 @@ export async function POST(req: Request) {
       if (pdfSupportRatio(spec) < 0.85) {
         return NextResponse.json({ error: "PDF export currently supports Latin-script languages. Export as DOCX or PPTX for this document." }, { status: 422 });
       }
-      buffer = await renderPdf(spec);
+      // pptx origin pdf keeps slide size (no reflow)
+      if ((spec as any).originFormat === "pptx" || spec.format === "pptx") buffer = await renderSlidesPdf(spec);
+      else buffer = await renderPdf(spec);
     }
     const filename = safeFileName(spec.title, format);
     return new Response(new Uint8Array(buffer), {

@@ -1,9 +1,10 @@
 import type { ZodType } from "zod";
 
-const BASE_URL = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
-const DEFAULT_MODEL = process.env.NVIDIA_MODEL || "nvidia/nemotron-3-ultra-550b-a55b";
+const BASE_URL =
+  process.env.AI_BASE_URL || process.env.NVIDIA_BASE_URL || (process.env.AI_MODEL?.startsWith("opencode/") || process.env.NVIDIA_MODEL?.startsWith("opencode/") ? "https://api.opencode.ai/v1" : "https://integrate.api.nvidia.com/v1");
+const DEFAULT_MODEL = process.env.AI_MODEL || process.env.NVIDIA_MODEL || "nvidia/nemotron-3-ultra-550b-a55b";
 
-export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+export type ChatMessage = { role: "system" | "user" | "assistant"; content: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> };
 
 export class AIError extends Error {
   status: number;
@@ -24,11 +25,11 @@ type CompletionOptions = {
 };
 
 export const MISSING_KEY_MESSAGE =
-  "NVIDIA_API_KEY is missing. Create a .env.local file in the project root with NVIDIA_API_KEY=nvapi-... and restart the dev server.";
+  "AI_API_KEY (or NVIDIA_API_KEY) is missing. Create a .env.local file in the project root with AI_API_KEY=sk-... (or NVIDIA_API_KEY=nvapi-...) and restart the dev server.";
 
 /** Reads the key tolerant of stray quotes/whitespace from hand-edited env files. */
 export function getApiKey(): string {
-  const raw = process.env.NVIDIA_API_KEY ?? "";
+  const raw = (process.env.AI_API_KEY ?? process.env.NVIDIA_API_KEY ?? "") as string;
   return raw.trim().replace(/^["']|["']$/g, "");
 }
 
@@ -47,7 +48,8 @@ export async function* chatCompletionStream(opts: CompletionOptions): AsyncGener
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 240_000);
-  const thinking = opts.thinking ?? process.env.NVIDIA_THINKING === "on";
+  const thinking = opts.thinking ?? (process.env.AI_THINKING ?? process.env.NVIDIA_THINKING) === "on";
+  const isNvidia = BASE_URL.includes("nvidia.com");
 
   const body: Record<string, unknown> = {
     model: DEFAULT_MODEL,
@@ -56,9 +58,11 @@ export async function* chatCompletionStream(opts: CompletionOptions): AsyncGener
     temperature: opts.temperature ?? 0.5,
     top_p: 0.95,
     stream: true,
-    chat_template_kwargs: { enable_thinking: thinking },
   };
-  if (thinking) body.reasoning_budget = 4096;
+  if (isNvidia) {
+    (body as any).chat_template_kwargs = { enable_thinking: thinking };
+    if (thinking) (body as any).reasoning_budget = 4096;
+  }
   if (opts.json) body.response_format = { type: "json_object" };
 
   let res: Response;
@@ -78,9 +82,10 @@ export async function* chatCompletionStream(opts: CompletionOptions): AsyncGener
   if (!res.ok) {
     clearTimeout(timer);
     const text = await res.text().catch(() => "");
-    if (res.status === 401 || res.status === 403) throw new AIError("The NVIDIA API key was rejected (401). Check NVIDIA_API_KEY in .env.local and restart the server.", 500);
+    if (res.status === 401 || res.status === 403) throw new AIError(`The API key was rejected (401) for ${BASE_URL} / ${DEFAULT_MODEL}. Check AI_API_KEY in .env.local and restart the server.`, 500);
     if (res.status === 429) throw new AIError("The model is rate limited right now, please retry in a moment", 429);
-    throw new AIError(`Model request failed (${res.status}): ${text.slice(0, 300)}`, 502);
+    if (res.status === 404) throw new AIError(`Model endpoint Not Found (404) for ${BASE_URL}/chat/completions with model ${DEFAULT_MODEL}: ${text.slice(0, 400)} — check AI_BASE_URL and AI_MODEL, then restart.`, 502);
+    throw new AIError(`Model request failed (${res.status}) at ${BASE_URL}: ${text.slice(0, 300)}`, 502);
   }
 
   const reader = res.body?.getReader();
@@ -119,25 +124,37 @@ export async function* chatCompletionStream(opts: CompletionOptions): AsyncGener
   }
 }
 
-/** Single chat completion against the NVIDIA NIM OpenAI-compatible endpoint. */
+/** Single chat completion — routes to NVIDIA or Zen (responses) automatically. */
 export async function chatCompletion(opts: CompletionOptions): Promise<string> {
   const apiKey = getApiKey();
   if (!apiKey) throw new AIError(MISSING_KEY_MESSAGE, 500);
 
+  const isZen = BASE_URL.includes("opencode.ai/zen");
+  const apiModel = (DEFAULT_MODEL || "").replace(/^opencode\//, "");
+  // Zen Muse Spark / GPT / etc use the Responses API at /responses, not /chat/completions
+  const useResponses = isZen && /^(muse-spark|gpt-|claude-|gemini|grok)/i.test(apiModel);
+
+  if (useResponses) {
+    return chatCompletionZen(opts, apiModel);
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 240_000);
-  const thinking = opts.thinking ?? process.env.NVIDIA_THINKING === "on";
+  const thinking = opts.thinking ?? (process.env.AI_THINKING ?? process.env.NVIDIA_THINKING) === "on";
+  const isNvidia = BASE_URL.includes("nvidia.com");
 
   const body: Record<string, unknown> = {
-    model: DEFAULT_MODEL,
+    model: apiModel,
     messages: opts.messages,
     max_tokens: opts.maxTokens ?? 4096,
     temperature: opts.temperature ?? 0.5,
     top_p: 0.95,
     stream: false,
-    chat_template_kwargs: { enable_thinking: thinking },
   };
-  if (thinking) body.reasoning_budget = 4096;
+  if (isNvidia) {
+    (body as any).chat_template_kwargs = { enable_thinking: thinking };
+    if (thinking) (body as any).reasoning_budget = 4096;
+  }
   if (opts.json) body.response_format = { type: "json_object" };
 
   // Transient upstream failures (overload, rate limit, gateway) are retried with backoff.
@@ -168,15 +185,20 @@ export async function chatCompletion(opts: CompletionOptions): Promise<string> {
   clearTimeout(timer);
 
   if (!res || !res.ok) {
-    if (lastStatus === 401 || lastStatus === 403) throw new AIError("The NVIDIA API key was rejected (401). Check NVIDIA_API_KEY in .env.local and restart the server.", 500);
+    if (lastStatus === 401 || lastStatus === 403) throw new AIError(`The API key was rejected (401) for ${BASE_URL} / ${DEFAULT_MODEL}. Check AI_API_KEY (or NVIDIA_API_KEY) in .env.local and restart the dev server.`, 500);
     if (lastStatus === 429) throw new AIError("The model is rate limited right now, please retry in a moment", 429);
     if (lastStatus === 503) throw new AIError("The model service is temporarily overloaded. Please try again in a moment.", 503);
-    throw new AIError(`Model request failed (${lastStatus}): ${lastText.slice(0, 300)}`, 502);
+    if (lastStatus === 404) throw new AIError(`Model endpoint Not Found (404) for ${BASE_URL}/chat/completions with model ${DEFAULT_MODEL}: ${lastText.slice(0, 400)} — check AI_BASE_URL and AI_MODEL, then restart the server.`, 502);
+    throw new AIError(`Model request failed (${lastStatus}) at ${BASE_URL}: ${lastText.slice(0, 300)}`, 502);
   }
 
-  const data = (await res.json()) as {
-    choices?: { message?: { content?: string | null; reasoning_content?: string | null }; finish_reason?: string }[];
-  };
+  let data: { choices?: { message?: { content?: string | null; reasoning_content?: string | null }; finish_reason?: string }[] };
+  try {
+    data = (await res.json()) as typeof data;
+  } catch (e) {
+    const txt = await res.text().catch(() => "");
+    throw new AIError(`Model returned non-JSON (${res.status}): ${txt.slice(0, 300) || (e as Error).message}`, 502);
+  }
   const content = data.choices?.[0]?.message?.content ?? "";
   const finish = data.choices?.[0]?.finish_reason;
   if (!content.trim()) throw new AIError("The model returned an empty response", 502);
@@ -186,6 +208,97 @@ export async function chatCompletion(opts: CompletionOptions): Promise<string> {
     if (!fixed) throw new AIError("The model response was cut off. Try a shorter document.", 502);
   }
   return stripThinking(content);
+}
+
+async function chatCompletionZen(opts: CompletionOptions, apiModel: string): Promise<string> {
+  const apiKey = getApiKey();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 240_000);
+  // Zen Responses API: https://opencode.ai/zen/v1/responses  (OpenAI Responses)
+  const input = opts.messages.map((m) => {
+    if (Array.isArray(m.content)) {
+      // Convert OpenAI chat vision parts to Zen Responses input_* types
+      const conv = (m.content as any[]).map((p: any) => {
+        if (p.type === "image_url" && p.image_url?.url) return { type: "input_image", image_url: p.image_url.url };
+        if (p.type === "text") return { type: "input_text", text: p.text };
+        if (p.type === "input_text" || p.type === "input_image") return p;
+        return p;
+      });
+      return { role: m.role as "user" | "assistant" | "system", content: conv };
+    }
+    return { role: m.role as "user" | "assistant" | "system", content: m.content };
+  });
+  // Muse Spark reasoning is expensive — use low effort and ensure enough output tokens for reasoning + JSON
+  const requestedMax = opts.maxTokens ?? 4096;
+  // For structured JSON tasks, ensure at least 8000 to avoid truncation (reasoning can consume 4k+)
+  const maxOut = opts.json ? Math.max(requestedMax, 8000) : Math.max(requestedMax, 2000);
+  const body: Record<string, unknown> = {
+    model: apiModel,
+    input,
+    max_output_tokens: maxOut,
+    temperature: opts.temperature ?? 0.5,
+    reasoning: { effort: "low" },
+    stream: false,
+  };
+  if (opts.json) (body as any).text = { format: { type: "json_object" } };
+  let res: Response | null = null;
+  let lastStatus = 0;
+  let lastText = "";
+  const TRANSIENT = new Set([408, 429, 500, 502, 503, 504]);
+  const delays = [1200, 2600, 4500];
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      res = await fetch(`${BASE_URL}/responses`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      const aborted = err instanceof Error && err.name === "AbortError";
+      throw new AIError(aborted ? "The model took too long to respond" : `Could not reach Zen: ${(err as Error).message}`, 504);
+    }
+    if (res.ok) break;
+    lastStatus = res.status;
+    lastText = await res.text().catch(() => "");
+    if (!TRANSIENT.has(res.status) || attempt === delays.length) break;
+    await new Promise((r) => setTimeout(r, delays[attempt]));
+  }
+  clearTimeout(timer);
+  if (!res || !res.ok) {
+    if (lastStatus === 401 || lastStatus === 403) throw new AIError(`Zen API key rejected (401) for ${BASE_URL}/responses model ${apiModel}. Check AI_API_KEY.`, 500);
+    throw new AIError(`Zen request failed (${lastStatus}) at ${BASE_URL}/responses: ${lastText.slice(0, 400)}`, 502);
+  }
+  let data: any;
+  try {
+    data = await res.json();
+  } catch (e) {
+    const txt = await res.text().catch(() => "");
+    throw new AIError(`Zen returned non-JSON (${res.status}): ${txt.slice(0, 300) || (e as Error).message}`, 502);
+  }
+  // Responses API shapes vary: try output_text, output[0].content[0].text, etc.
+  let content: string | null = null;
+  if (typeof data.output_text === "string") content = data.output_text;
+  else if (Array.isArray(data.output)) {
+    // output is array of items with content array
+    const texts: string[] = [];
+    for (const item of data.output) {
+      if (item.content && Array.isArray(item.content)) for (const c of item.content) if (c.text) texts.push(c.text);
+      else if (item.text) texts.push(item.text);
+    }
+    if (texts.length) content = texts.join("\n");
+    else if (data.output[0]?.content?.[0]?.text) content = data.output[0].content[0].text;
+  }
+  if (!content) content = (data as any).choices?.[0]?.message?.content ?? (data as any).output?.[0]?.content?.[0]?.text ?? (data as any).choices?.[0]?.text ?? "";
+  if (!content || !String(content).trim()) throw new AIError(`Zen returned empty response: ${JSON.stringify(data).slice(0, 800)}`, 502);
+  let str = stripThinking(String(content));
+  // handle finish length for json
+  if ((data as any).incomplete_details?.reason === "max_output_tokens" && opts.json) {
+    const fixed = tryExtractJSON(str);
+    if (!fixed) throw new AIError("Zen response was cut off. Try a shorter document.", 502);
+  }
+  return str;
 }
 
 export function stripThinking(text: string): string {

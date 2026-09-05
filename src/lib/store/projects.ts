@@ -10,7 +10,7 @@ export type StoredMessage = {
   attachedNames?: string[];
 };
 
-export type StoredAttachment = { id: string; name: string; size: number; kind: string; text: string; chars: number; pages?: number };
+export type StoredAttachment = { id: string; name: string; size: number; kind: string; text: string; chars: number; pages?: number; dataUrl?: string; mimeType?: string; isImage?: boolean };
 
 export type ProjectStatus = "planning" | "draft" | "generated";
 

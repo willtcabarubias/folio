@@ -26,7 +26,7 @@ export async function POST(req: Request) {
   const parsed = OutlineSchema.safeParse(body.outline);
   if (!parsed.success) return NextResponse.json({ error: "Outline is invalid" }, { status: 400 });
   const outline: Outline = normalizeOutline(parsed.data);
-  const attachments = (body.attachments ?? []).filter((a) => a && a.text?.trim()).slice(0, 8);
+  const attachments = (body.attachments ?? []).filter((a) => a && ((a as any).isImage || a.text?.trim())).slice(0, 8);
   const transcript = (body.transcript ?? []).filter((t) => t && typeof t.content === "string").slice(-10);
 
   const system = expandSystemPrompt(outline);

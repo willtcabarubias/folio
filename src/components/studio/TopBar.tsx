@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Bug, Check, ChevronDown, Copy, Download, FileImage, FileText, House, LayoutList, Link2, Loader2, Presentation, Save, ScanEye, Share2, Type } from "lucide-react";
+import { Bug, Check, ChevronDown, Download, FileText, House, LayoutList, Link2, Loader2, MoreHorizontal, Presentation, Save, ScanEye, Share2 } from "lucide-react";
 import { useErrorLog } from "@/lib/error/store";
 
-export type ExportKind = "pptx" | "docx" | "pdf" | "png" | "md";
-export type ShareKind = "link" | "file" | "text";
+export type ExportKind = "pptx" | "docx" | "pdf";
+export type ShareKind = "link" | "file";
 export type SaveState = "saved" | "dirty" | "saving";
 
 type Props = {
@@ -23,9 +23,10 @@ type Props = {
   isPlanning?: boolean;
   isBusy?: boolean;
   centerLabel?: "Outline" | "Preview";
+  originFormat?: "pptx" | "docx" | "pdf";
 };
 
-export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exporting, onExport, onShare, canShareFile, status, isPlanning, isBusy, centerLabel }: Props) {
+export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exporting, onExport, onShare, canShareFile, status, isPlanning, isBusy, centerLabel, originFormat }: Props) {
   const { errors, hasUnread, open } = useErrorLog();
   const errCount = errors.length;
   if (isPlanning) {
@@ -119,30 +120,44 @@ export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exp
             ) : null}
             {hasUnread ? <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-white ring-2 ring-red-600" aria-hidden="true" /> : null}
           </button>
+          {/* Desktop: Save + Share inline */}
           <button
             type="button"
             onClick={onSave}
             disabled={busy}
-            className="btn-secondary h-9 px-3 disabled:cursor-not-allowed disabled:opacity-50 md:h-[31px] md:px-2.5 md:text-xs"
+            className="hidden btn-secondary h-9 px-3 disabled:cursor-not-allowed disabled:opacity-50 md:inline-flex md:h-[31px] md:px-2.5 md:text-xs"
             title={busy ? "File is updating — please wait" : "Save to library"}
           >
             <Save size={15} className="md:h-3.5 md:w-3.5" />
             <span className="hidden sm:inline">Save</span>
           </button>
-          <Menu
-            label={
-              <>
-                <Share2 size={15} className="md:h-3.5 md:w-3.5" />
-                <span className="hidden sm:inline">Share</span>
-              </>
-            }
-            className="btn-secondary h-9 px-3 md:h-[31px] md:px-2.5 md:text-xs"
-            disabled={busy}
-          >
-            <MenuItem icon={<Link2 size={15} />} label="Copy link" hint={busy ? "File is updating — please wait" : "Opens this project in this browser"} disabled={busy} onClick={() => onShare("link")} />
-            <MenuItem icon={<Share2 size={15} />} label="Share file…" hint={busy ? "File is updating — please wait" : canShareFile ? "Send the PDF with your device" : "Generate first"} disabled={busy || !canShareFile} onClick={() => onShare("file")} />
-            <MenuItem icon={<Copy size={15} />} label="Copy as text" hint={busy ? "File is updating — please wait" : "Outline or content as Markdown"} disabled={busy} onClick={() => onShare("text")} />
-          </Menu>
+          <div className="hidden md:flex">
+            <Menu
+              label={
+                <>
+                  <Share2 size={15} className="md:h-3.5 md:w-3.5" />
+                  <span className="hidden sm:inline">Share</span>
+                </>
+              }
+              className="btn-secondary h-9 px-3 md:h-[31px] md:px-2.5 md:text-xs"
+              disabled={busy}
+            >
+              <MenuItem icon={<Link2 size={15} />} label="Copy link" hint={busy ? "File is updating — please wait" : "Opens this project in this browser"} disabled={busy} onClick={() => onShare("link")} />
+              <MenuItem icon={<Share2 size={15} />} label="Share file…" hint={busy ? "File is updating — please wait" : canShareFile ? "Send the PDF with your device" : "Generate first"} disabled={busy || !canShareFile} onClick={() => onShare("file")} />
+            </Menu>
+          </div>
+          {/* Mobile: Save + Share collapsed into 3-dot */}
+          <div className="flex md:hidden">
+            <Menu
+              label={<MoreHorizontal size={18} className="md:h-4 md:w-4" />}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-ink ring-1 ring-line hover:bg-slate-50 md:h-[31px] md:w-[31px]"
+              disabled={busy}
+            >
+              <MenuItem icon={<Save size={15} />} label="Save" hint={busy ? "File is updating — please wait" : saveState === "saved" ? "Saved to library" : "Save to library"} disabled={busy} onClick={onSave} />
+              <MenuItem icon={<Link2 size={15} />} label="Copy link" hint={busy ? "File is updating — please wait" : "Opens this project in this browser"} disabled={busy} onClick={() => onShare("link")} />
+              <MenuItem icon={<Share2 size={15} />} label="Share file…" hint={busy ? "File is updating — please wait" : canShareFile ? "Send the PDF with your device" : "Generate first"} disabled={busy || !canShareFile} onClick={() => onShare("file")} />
+            </Menu>
+          </div>
           <Menu
             label={
               <>
@@ -159,12 +174,9 @@ export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exp
             ) : (
               !canExport && <p className="px-3 pb-2 pt-1 text-xs text-muted md:text-[11px]">Generate the document first.</p>
             )}
-            <MenuItem icon={<Presentation size={15} />} label="PowerPoint" hint=".pptx" disabled={!canExport || Boolean(exporting) || busy} onClick={() => onExport("pptx")} />
-            <MenuItem icon={<FileText size={15} />} label="Word" hint=".docx" disabled={!canExport || Boolean(exporting) || busy} onClick={() => onExport("docx")} />
+            {(!originFormat || originFormat === "pptx") && <MenuItem icon={<Presentation size={15} />} label="PowerPoint" hint=".pptx" disabled={!canExport || Boolean(exporting) || busy} onClick={() => onExport("pptx")} />}
+            {(!originFormat || originFormat === "docx" || originFormat === "pdf") && <MenuItem icon={<FileText size={15} />} label="Word" hint=".docx" disabled={!canExport || Boolean(exporting) || busy} onClick={() => onExport("docx")} />}
             <MenuItem icon={<FileText size={15} />} label="PDF" hint=".pdf" disabled={!canExport || Boolean(exporting) || busy} onClick={() => onExport("pdf")} />
-            <div className="my-1 border-t border-line" />
-            <MenuItem icon={<FileImage size={15} />} label="Images" hint=".png — one per page, zipped" disabled={!canExport || Boolean(exporting) || busy} onClick={() => onExport("png")} />
-            <MenuItem icon={<Type size={15} />} label="Markdown" hint=".md" disabled={!canExport || Boolean(exporting) || busy} onClick={() => onExport("md")} />
           </Menu>
         </div>
       )}

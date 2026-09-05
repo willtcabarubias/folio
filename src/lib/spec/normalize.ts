@@ -195,6 +195,10 @@ export function normalizeOutline(raw: RawOutline): Outline {
     if (lengthSource === "user" && !requested) lengthSource = "inferred";
   }
 
+  // Theme: respect explicit request, otherwise default to resolver-friendly warm via DEFAULT
+  const rawTheme = typeof (raw as any).theme === "string" ? String((raw as any).theme).toLowerCase().trim() : "";
+  const allowed = new Set<string>(["mono", "azure", "executive", "academic", "midnight", "coral", "forest", "slate", "plum", "warm", "noir", "cool"]);
+  const theme = allowed.has(rawTheme) ? (rawTheme as any) : DEFAULT_THEME;
   return {
     title: cleanText(raw.title) || "Untitled",
     subtitle: raw.subtitle ? cleanText(raw.subtitle) : undefined,
@@ -204,7 +208,7 @@ export function normalizeOutline(raw: RawOutline): Outline {
     audience: raw.audience ? cleanText(raw.audience) : undefined,
     tone: raw.tone ? cleanText(raw.tone) : undefined,
     language: cleanText(raw.language) || "English",
-    theme: DEFAULT_THEME,
+    theme,
     pageSize: raw.pageSize,
     targetLength,
     lengthSource,
@@ -240,12 +244,13 @@ export function pagePlan(outline: Outline): PagePlan {
   const isDeck = outline.format === "pptx";
   const contentSections = outline.sections.filter((s) => s.layout !== "cover" && s.layout !== "agenda").length;
   if (isDeck) return { compact: false, coverPage: false, tocPage: false, contentPages: pages, wordsTotal: 0, contentSections };
-  const compact = pages <= 2;
-  const coverPage = !compact;
-  const tocPage = !compact && pages >= 6 && contentSections >= 5;
-  const contentPages = Math.max(1, pages - (coverPage ? 1 : 0) - (tocPage ? 1 : 0));
-  const wordsPerPage = compact ? 360 : 420;
-  const wordsTotal = Math.max(120, Math.round(contentPages * wordsPerPage - (compact ? 40 : 0)));
+  // Docs: strip cover + TOC — always compact inline header
+  const compact = true;
+  const coverPage = false;
+  const tocPage = false;
+  const contentPages = Math.max(1, pages);
+  const wordsPerPage = 380;
+  const wordsTotal = Math.max(120, Math.round(contentPages * wordsPerPage));
   return { compact, coverPage, tocPage, contentPages, wordsTotal, contentSections };
 }
 
@@ -288,7 +293,8 @@ type RawBlock = {
 
 export function normalizeBlock(raw: RawBlock, fallbackId: string, format: Format, hint?: OutlineSection): Block {
   const isDeck = format === "pptx";
-  const bulletMax = isDeck ? 160 : 400;
+  // Tight caps for editorial slides: large type needs short lines (≤12 words ≈ 80 chars inc avg 6.5)
+  const bulletMax = isDeck ? 80 : 400;
 
   const bullets = raw.bullets.map((b) => cleanBullet(b, bulletMax)).filter(Boolean);
   const columns = (raw.columns ?? [])
@@ -304,7 +310,7 @@ export function normalizeBlock(raw: RawBlock, fallbackId: string, format: Format
     .filter((s) => s.value && s.label)
     .slice(0, 4);
   const steps = (raw.steps ?? [])
-    .map((s) => ({ label: cleanText(s.label).slice(0, 70), description: s.description ? cleanBullet(s.description, isDeck ? 140 : 400) : undefined }))
+    .map((s) => ({ label: cleanText(s.label).slice(0, 48), description: s.description ? cleanBullet(s.description, isDeck ? 90 : 400) : undefined }))
     .filter((s) => s.label)
     .slice(0, isDeck ? 5 : 10);
   const groups = (raw.groups ?? [])
@@ -349,6 +355,7 @@ export function normalizeBlock(raw: RawBlock, fallbackId: string, format: Format
   let layout: Layout = raw.layout ?? hint?.layout ?? "bullets";
 
   // Content-driven layout repair: never render an empty layout.
+  // No heuristic column fabrication — 2/3-col choice is model-driven only (user wants token uniformity).
   if (layout === "quiz" && (!quiz || quiz.length < 1)) layout = bullets.length ? "bullets" : "paragraph";
   if (layout === "stats" && stats.length < 2) layout = bullets.length ? "bullets" : quiz?.length ? "quiz" : "paragraph";
   if (layout === "timeline" && steps.length < 2) layout = bullets.length ? "bullets" : quiz?.length ? "quiz" : "paragraph";
@@ -357,15 +364,7 @@ export function normalizeBlock(raw: RawBlock, fallbackId: string, format: Format
   if (layout === "groups" && groups.length < 1) layout = columns.length >= 2 ? "two-column" : bullets.length ? "bullets" : quiz?.length ? "quiz" : "paragraph";
   if ((layout === "two-column" || layout === "comparison") && columns.length < 2) {
     if (groups.length >= 1) layout = "groups";
-    else if (bullets.length >= 4 && layout === "two-column") {
-      const half = Math.ceil(bullets.length / 2);
-      columns.splice(
-        0,
-        columns.length,
-        { heading: undefined, bullets: bullets.slice(0, half), body: undefined },
-        { heading: undefined, bullets: bullets.slice(half), body: undefined },
-      );
-    } else layout = bullets.length ? "bullets" : "paragraph";
+    else layout = bullets.length ? "bullets" : body ? "paragraph" : quiz?.length ? "quiz" : "paragraph";
   }
   if (layout === "bullets" && bullets.length === 0) {
     if (groups.length) layout = "groups";
@@ -401,19 +400,22 @@ export function normalizeBlock(raw: RawBlock, fallbackId: string, format: Format
     groups: groups.length ? groups : undefined,
     table,
     quiz: quiz?.length ? quiz : undefined,
-    callout: raw.callout ? cleanBullet(raw.callout, 220) : undefined,
+    // callout only if LLM explicitly supplied one and user wants it — no auto-generation downstream
+    callout: raw.callout ? cleanBullet(raw.callout, 140) : undefined,
     notes: raw.notes ? cleanText(raw.notes, { keepNewlines: true }) : undefined,
   };
 }
 
 /** Deterministic fallback when the model fails for a batch of sections. */
 export function blockFromOutlineSection(section: OutlineSection, outline: Outline): Block {
-  const points = section.points.length ? section.points : [`Overview of ${section.title}`];
+  const points = section.points.length ? section.points.slice(0, 5) : [`Overview of ${section.title}`];
   if (section.layout === "cover") {
-    return { id: section.id, layout: "cover", title: outline.title, subtitle: outline.subtitle, bullets: section.points.slice(0, 4) };
+    return { id: section.id, layout: "cover", title: outline.title, subtitle: outline.subtitle, bullets: section.points.slice(0, 3) };
   }
-  if (section.layout === "closing") return { id: section.id, layout: "closing", title: section.title, bullets: points, callout: outline.subtitle };
-  if (outline.format === "pptx") return { id: section.id, layout: "bullets", title: section.title, bullets: points, notes: points.join(". ") };
+  if (section.layout === "closing")
+    return { id: section.id, layout: "closing", title: section.title || outline.title, subtitle: outline.subtitle, bullets: points.slice(0, 3) };
+  if (outline.format === "pptx")
+    return { id: section.id, layout: "bullets", title: section.title, bullets: points.slice(0, 4), notes: points.join(". ") };
   return { id: section.id, layout: "bullets", title: section.title, bullets: points };
 }
 
@@ -424,7 +426,8 @@ export function blockFromOutlineSection(section: OutlineSection, outline: Outlin
 export function designPass(outline: Outline, blocks: Block[], format: Format): DocumentSpec {
   const isDeck = format === "pptx";
   const targetPages = isDeck ? undefined : Math.max(1, outline.targetLength);
-  const compact = !isDeck && (targetPages ?? 3) <= 2;
+  // Docs: always compact (no dedicated cover page), decks keep cover
+  const compact = isDeck ? false : true;
   let out: Block[] = [];
   for (const b of blocks) out.push(...(isDeck ? splitForSlides(b) : [b]));
 
@@ -438,16 +441,18 @@ export function designPass(outline: Outline, blocks: Block[], format: Format): D
   const middle = rest.filter((b) => b.layout !== "closing");
   for (const extra of closings.slice(0, -1)) middle.push({ ...extra, layout: extra.bullets.length ? "bullets" : "paragraph" });
   let closing: Block | undefined = closings[closings.length - 1];
+  // Editorial closing mirrors cover — no synthetic "Key Takeaways". Only keep explicit closings; if none, create a minimal editorial end that mirrors cover.
   if (isDeck && !closing) {
     closing = {
       id: "closing",
       layout: "closing",
-      title: "Key Takeaways",
-      bullets: middle
-        .filter((b) => b.layout !== "agenda" && b.layout !== "section")
-        .slice(0, 4)
-        .map((b) => b.title),
+      title: outline.title,
+      subtitle: outline.subtitle ?? "Thank You",
+      bullets: [],
     };
+  } else if (isDeck && closing) {
+    // Normalize closing: keep title/subtitle as-is; drop synthetic bullet takeaways if they are just section titles and not real content
+    if (!closing.subtitle && outline.subtitle) closing.subtitle = outline.subtitle;
   }
   out = closing ? [cover, ...middle, closing] : [cover, ...middle];
 
@@ -471,6 +476,13 @@ export function designPass(outline: Outline, blocks: Block[], format: Format): D
     out[i].variant = run % 2;
   }
 
+  // Pagination hint: Part A/B, Section II, Chapter 2 etc. prefer fresh page when >1 page total.
+  // Honored by pdf/docx renderers only when targetPages > 1 (1-page forces single page).
+  const partRe = /^\s*(Part\s+[A-Z0-9]+|Section\s+\d+|Chapter\s+\d+|Module\s+\d+|Unit\s+\d+)\b/i;
+  for (let i = 1; i < out.length; i++) {
+    if (partRe.test(out[i].title)) out[i].breakBefore = true;
+  }
+
   return {
     title: outline.title,
     subtitle: outline.subtitle,
@@ -482,6 +494,7 @@ export function designPass(outline: Outline, blocks: Block[], format: Format): D
     theme: outline.theme,
     pageSize: outline.pageSize,
     format,
+    originFormat: format,
     targetPages,
     compact,
     density: 1,
@@ -500,7 +513,7 @@ function dedupe(list: string[]): string[] {
   });
 }
 
-const MAX_BULLETS_PER_SLIDE = 6;
+const MAX_BULLETS_PER_SLIDE = 5;
 
 /** Split overloaded slides into continuation slides instead of overflowing. */
 function splitForSlides(b: Block): Block[] {
@@ -516,30 +529,31 @@ function splitForSlides(b: Block): Block[] {
       callout: i === chunks.length - 1 ? b.callout : undefined,
     }));
   }
-  if (b.layout === "groups" && b.groups && b.groups.length > 3) {
+  // Pricing variant supports 4 cards; keep groups at 4 max for editorial 4-col grid (mutiplecolumn.png)
+  if (b.layout === "groups" && b.groups && b.groups.length > 4) {
     const parts: Block[] = [];
-    for (let i = 0, n = 0; i < b.groups.length; i += 3, n++) {
-      parts.push({ ...b, id: n === 0 ? b.id : `${b.id}_${n + 1}`, title: n === 0 ? b.title : `${b.title} (cont.)`, groups: b.groups.slice(i, i + 3) });
+    for (let i = 0, n = 0; i < b.groups.length; i += 4, n++) {
+      parts.push({ ...b, id: n === 0 ? b.id : `${b.id}_${n + 1}`, title: n === 0 ? b.title : `${b.title} (cont.)`, groups: b.groups.slice(i, i + 4) });
     }
     return parts;
   }
   if (b.layout === "paragraph" && b.body) {
     const words = wordCount(b.body);
-    if (words > 90) {
+    if (words > 75) {
       const sentences = b.body
         .replace(/\n+/g, " ")
         .split(/(?<=[.!?])\s+/)
         .map((s) => s.trim())
         .filter(Boolean);
-      const bullets = sentences.map((s) => cleanBullet(s, 160)).slice(0, 12);
+      const bullets = sentences.map((s) => cleanBullet(s, 80)).slice(0, 8);
       return splitForSlides({ ...b, layout: "bullets", bullets, body: undefined });
     }
   }
-  if (b.layout === "table" && b.table && b.table.rows.length > 7) {
+  if (b.layout === "table" && b.table && b.table.rows.length > 6) {
     const rows = b.table.rows;
     const parts: Block[] = [];
-    for (let i = 0, n = 0; i < rows.length; i += 7, n++) {
-      parts.push({ ...b, id: n === 0 ? b.id : `${b.id}_${n + 1}`, title: n === 0 ? b.title : `${b.title} (cont.)`, table: { headers: b.table.headers, rows: rows.slice(i, i + 7) } });
+    for (let i = 0, n = 0; i < rows.length; i += 6, n++) {
+      parts.push({ ...b, id: n === 0 ? b.id : `${b.id}_${n + 1}`, title: n === 0 ? b.title : `${b.title} (cont.)`, table: { headers: b.table.headers, rows: rows.slice(i, i + 6) } });
     }
     return parts;
   }

@@ -48,7 +48,8 @@ function drawText(doc: PDFKit.PDFDocument, t: TextPrim) {
   doc.font(font).fontSize(size).fillColor(hex(t.color)).fillOpacity(t.opacity);
   paragraphs.forEach((p, i) => {
     if (t.bullets) {
-      doc.circle(x + 4, cursor + m.lineH * 0.55, size * 0.14).fill(hex(t.color));
+      const s = size * 0.28;
+      doc.roundedRect(x + 2, cursor + m.lineH * 0.42, s, s, s * 0.32).fill(hex(t.color));
     }
     doc.text(p, x + indent, cursor, { width: w - indent, align: t.align, lineGap: m.lineGap, characterSpacing: t.charSpacing, lineBreak: true });
     cursor += m.heights[i] + size * t.paraGap;

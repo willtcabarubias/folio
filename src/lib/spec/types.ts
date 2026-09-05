@@ -25,7 +25,7 @@ export const LAYOUTS = [
 ] as const;
 export type Layout = (typeof LAYOUTS)[number];
 
-export const THEME_IDS = ["mono", "azure", "executive", "academic", "midnight", "coral", "forest", "slate", "plum"] as const;
+export const THEME_IDS = ["mono", "azure", "executive", "academic", "midnight", "coral", "forest", "slate", "plum", "warm", "noir", "cool"] as const;
 export type ThemeId = (typeof THEME_IDS)[number];
 export const DEFAULT_THEME: ThemeId = "mono";
 
@@ -356,6 +356,8 @@ export type Block = {
   notes?: string;
   /** Assigned by the design pass to alternate visual treatments. */
   variant?: number;
+  /** Pagination hint: when true, this block prefers to start on a fresh page (honored when targetPages>1). */
+  breakBefore?: boolean;
 };
 
 export const ExpandResponseSchema = z.preprocess((v) => {
@@ -387,6 +389,8 @@ export type DocumentSpec = {
   pageSize: PageSize;
   /** Format the blocks were designed for. */
   format: Format;
+  /** Origin format chosen by user — locks export options (pptx can only export pptx/pdf/img, etc.). */
+  originFormat?: Format;
   /** Page budget for documents (undefined for decks). */
   targetPages?: number;
   /** ≤ 2 pages: inline header instead of a cover page, tighter rhythm. */
@@ -413,13 +417,17 @@ export type Attachment = {
   pages?: number;
   status: "extracting" | "ready" | "error";
   error?: string;
+  // Vision: image base64 for direct LLM vision (bypass text extraction)
+  dataUrl?: string;
+  mimeType?: string;
+  isImage?: boolean;
 };
 
 export type ChatTurn = { role: "user" | "assistant"; content: string };
 
 export type AgentRequest = {
   messages: ChatTurn[];
-  attachments?: { name: string; text: string }[];
+  attachments?: { name: string; text: string; dataUrl?: string; mimeType?: string; isImage?: boolean }[];
   currentOutline?: Outline | null;
   preferredFormat?: Format | "auto";
 };
@@ -427,7 +435,7 @@ export type AgentRequest = {
 export type ExpandRequest = {
   outline: Outline;
   transcript: ChatTurn[];
-  attachments?: { name: string; text: string }[];
+  attachments?: { name: string; text: string; dataUrl?: string; mimeType?: string; isImage?: boolean }[];
 };
 
 export type RenderRequest = {

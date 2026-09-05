@@ -22,6 +22,7 @@ import {
   type IBorderOptions,
   type ITableCellOptions,
 } from "docx";
+import { resolveDesign } from "@/lib/design/resolver";
 import { getTheme, type Theme } from "@/lib/spec/themes";
 import type { Block, DocumentSpec } from "@/lib/spec/types";
 import { lightColors } from "./pdf";
@@ -194,64 +195,110 @@ function coverPage(ctx: Ctx, spec: DocumentSpec, b: Block | undefined): (Paragra
   const w = ctx.contentWidth;
   const title = b?.title || spec.title;
   const subtitle = b?.subtitle || spec.subtitle;
-  const band = new Table({
-    width: { size: w, type: WidthType.DXA },
-    columnWidths: [w],
-    borders: noBorders,
-    rows: [
-      new TableRow({
-        height: { value: 7400, rule: HeightRule.ATLEAST },
-        children: [
-          new TableCell({
-            width: { size: w, type: WidthType.DXA },
-            shading: { type: ShadingType.CLEAR, fill: ctx.c.primary, color: "auto" },
-            margins: { top: 700, bottom: 600, left: 700, right: 700 },
-            verticalAlign: VerticalAlign.CENTER,
-            borders: noBorders,
-            children: [
-              para(ctx, [run(ctx, spec.docType.toUpperCase(), { size: 9, color: ctx.c.accent, bold: true, spacing: 40 })], { after: 360 }),
-              para(ctx, [run(ctx, title, { size: title.length > 60 ? 24 : 30, bold: true, color: ctx.c.onPrimary, font: ctx.head })], { after: 240, line: 260 }),
-              ...(subtitle ? [para(ctx, [run(ctx, subtitle, { size: 13, color: ctx.c.onPrimary })], { after: 0, line: 300 })] : []),
-            ],
-          }),
-        ],
-      }),
+  // Editorial header rule
+  const header = new Paragraph({
+    children: [
+      new TextRun({ text: (spec.docType || "Folio").toUpperCase(), size: 12, color: ctx.c.muted, font: ctx.body, allCaps: true, characterSpacing: 40 }),
+      new TextRun({ text: "\t", size: 12 }),
+      new TextRun({ text: spec.date || new Date().toLocaleDateString("en-US", { day: "2-digit", month: "short", year: "numeric" }), size: 12, color: ctx.c.muted, font: ctx.body }),
     ],
+    tabStops: [{ type: TabStopType.RIGHT, position: w }],
+    border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: ctx.c.line, space: 4 } },
+    spacing: { after: 400 },
   });
-  const meta = [spec.author, spec.date].filter(Boolean).join("   ·   ");
-  const out: (Paragraph | Table)[] = [band, spacer(ctx, 300)];
-  if (b?.body) {
-    out.push(para(ctx, [run(ctx, "ABSTRACT", { size: 8, bold: true, color: ctx.c.muted, spacing: 30 })], { after: 120 }));
-    out.push(...bodyParagraphs(ctx, b.body));
-  }
-  if (b?.bullets.length) out.push(...bulletParas(ctx, b.bullets));
-  out.push(spacer(ctx, 400));
-  out.push(
-    new Paragraph({
-      children: [run(ctx, meta || spec.title, { size: 10, color: ctx.c.muted })],
-      border: { top: { style: BorderStyle.SINGLE, size: 6, color: ctx.c.line, space: 8 } },
-      spacing: { before: 200, after: 0 },
+  // Huge condensed title centered
+  const tSize = title.length > 58 ? 30 : title.length > 42 ? 36 : title.length > 28 ? 44 : 52;
+  const titlePara = new Paragraph({
+    alignment: AlignmentType.CENTER,
+    children: [new TextRun({ text: title.toUpperCase(), bold: true, size: tSize * 2, color: ctx.c.text, font: ctx.head, characterSpacing: -10 })],
+    spacing: { before: 800, after: 400 },
+  });
+  // Pills — use subtitle + bullets as pill text
+  const pillsRaw: string[] = [];
+  if (subtitle) pillsRaw.push(subtitle.toUpperCase());
+  if (b?.bullets?.length) pillsRaw.push(...b.bullets.map((x) => x.toUpperCase()).slice(0, 3));
+  const pills = pillsRaw.length ? pillsRaw.slice(0, 3) : [spec.docType.toUpperCase()];
+  const pillGap = 200;
+  const pillW = Math.floor((w - pillGap * (pills.length - 1)) / pills.length);
+  const pillCells = pills.map((p) =>
+    new TableCell({
+      width: { size: pillW, type: WidthType.DXA },
+      borders: { top: { style: BorderStyle.SINGLE, size: 4, color: ctx.c.line }, bottom: { style: BorderStyle.SINGLE, size: 4, color: ctx.c.line }, left: { style: BorderStyle.SINGLE, size: 4, color: ctx.c.line }, right: { style: BorderStyle.SINGLE, size: 4, color: ctx.c.line } },
+      shading: { type: ShadingType.CLEAR, fill: ctx.c.bg, color: "auto" },
+      verticalAlign: VerticalAlign.CENTER,
+      margins: { top: 60, bottom: 60, left: 120, right: 120 },
+      children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: p.slice(0, 22), size: 13, color: ctx.c.text, bold: true, characterSpacing: 20 })] })],
     }),
   );
+  const gapCells: TableCell[] = [];
+  if (pills.length > 1) {
+    for (let i = 0; i < pills.length - 1; i++) gapCells.push(new TableCell({ width: { size: pillGap, type: WidthType.DXA }, borders: noBorders, children: [new Paragraph("")] }));
+  }
+  const pillRowCells: TableCell[] = [];
+  pills.forEach((_, i) => {
+    pillRowCells.push(pillCells[i]);
+    if (i < pills.length - 1) pillRowCells.push(gapCells[i]);
+  });
+  const pillTable = new Table({
+    width: { size: w, type: WidthType.DXA },
+    columnWidths: pills.flatMap((_, i) => (i < pills.length - 1 ? [pillW, pillGap] : [pillW])),
+    borders: noBorders,
+    rows: [new TableRow({ children: pillRowCells })],
+  });
+  const out: (Paragraph | Table)[] = [header, titlePara, pillTable, spacer(ctx, 400)];
+  // optional body as centered abstract
+  if (b?.body) {
+    out.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [run(ctx, b.body.replace(/\n+/g, " "), { size: 9, color: ctx.c.muted })], spacing: { before: 200, after: 200 } }));
+  }
+  // bottom footer rule — lean, project-adopted
+  out.push(
+    new Paragraph({
+      border: { top: { style: BorderStyle.SINGLE, size: 4, color: ctx.c.line, space: 6 } },
+      spacing: { before: 600 },
+      children: [],
+    }),
+  );
+  const footerTxt = (spec.author || spec.subtitle || "").trim().slice(0, 60);
+  if (footerTxt) {
+    out.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [new TextRun({ text: footerTxt, size: 12, color: ctx.c.muted, font: ctx.body, allCaps: true, characterSpacing: 40 })],
+        spacing: { before: 60, after: 0 },
+      }),
+    );
+  }
   out.push(new Paragraph({ children: [new PageBreak()] }));
   return out;
 }
 
 function compactHeader(ctx: Ctx, spec: DocumentSpec, b: Block | undefined): (Paragraph | Table)[] {
   const title = b?.title || spec.title;
-  const subtitle = b?.subtitle || spec.subtitle;
-  const meta = (b?.bullets ?? []).filter(Boolean).join("   ·   ");
-  const out: Paragraph[] = [para(ctx, [run(ctx, title, { bold: true, font: ctx.head, color: ctx.c.primary, size: title.length > 40 ? 20 : 24 })], { after: 40, line: 240 })];
-  if (subtitle) out.push(para(ctx, [run(ctx, subtitle, { size: 11.5, color: ctx.c.secondary })], { after: 40 }));
-  if (meta) out.push(para(ctx, [run(ctx, meta, { size: 9.2, color: ctx.c.muted })], { after: 40 }));
-  if (b?.body) out.push(...bodyParagraphs(ctx, b.body));
-  const last = out[out.length - 1];
-  out[out.length - 1] = new Paragraph({
-    children: [],
-    spacing: { after: Math.round(120 * ctx.k) },
-    border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: ctx.c.primary, space: 4 } },
+  const subtitle = b?.subtitle || spec.subtitle || "";
+  const header = new Paragraph({
+    children: [
+      new TextRun({ text: (spec.docType || "Folio").toUpperCase(), size: 12, color: ctx.c.muted, font: ctx.body, allCaps: true, characterSpacing: 40 }),
+      new TextRun({ text: "\t" + (spec.date || ""), size: 12, color: ctx.c.muted, font: ctx.body }),
+    ],
+    tabStops: [{ type: TabStopType.RIGHT, position: ctx.contentWidth }],
+    border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: ctx.c.line, space: 4 } },
+    spacing: { after: 160 },
   });
-  out.splice(out.length - 1, 0, last);
+  const tSize = title.length > 64 ? 19 : title.length > 40 ? 22 : 26;
+  const titlePara = new Paragraph({
+    alignment: AlignmentType.LEFT,
+    children: [new TextRun({ text: title, bold: true, size: tSize * 2, color: ctx.c.text, font: ctx.head })],
+    spacing: { before: 120, after: subtitle ? 60 : 40 },
+  });
+  const out: (Paragraph | Table)[] = [header, titlePara];
+  if (subtitle) {
+    out.push(para(ctx, [run(ctx, subtitle, { italic: true, color: ctx.c.muted, size: 11 })], { after: 80 }));
+  } else {
+    const meta = (b?.bullets ?? []).filter(Boolean).slice(0, 2).join("  ·  ");
+    if (meta) out.push(para(ctx, [run(ctx, meta, { size: 9, color: ctx.c.muted })], { after: 60 }));
+  }
+  if (b?.body) out.push(...bodyParagraphs(ctx, b.body));
+  out.push(new Paragraph({ children: [], border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: ctx.c.line, space: 4 } }, spacing: { after: 100 } }));
   return out;
 }
 
@@ -315,7 +362,21 @@ function renderBlock(ctx: Ctx, b: Block): (Paragraph | Table)[] {
         if (c.body) list.push(...bodyParagraphs(ctx, c.body));
         list.push(...bulletParas(ctx, c.bullets, 9.8));
         if (isComp) {
-          const head = para(ctx, [run(ctx, c.heading ?? (i === 0 ? "Option A" : "Option B"), { bold: true, font: ctx.head, color: ctx.c.onPrimary, size: 11 })], { after: 0 });
+          const head = para(ctx, [run(ctx, c.heading ?? (i === 0 ? "Option A" : "Option B"), { bold: true, font: ctx.head, color: ctx.c.text, size: 11 })], { after: 80, line: 260 });
+          const headCell = new TableCell({
+            width: { size: cw, type: WidthType.DXA },
+            borders: { ...noBorders, bottom: { style: BorderStyle.SINGLE, size: 4, color: ctx.c.line } },
+            children: [head],
+            margins: { top: 80, bottom: 80, left: 100, right: 100 },
+            verticalAlign: VerticalAlign.CENTER,
+          });
+          const bodyCell = new TableCell({
+            width: { size: cw, type: WidthType.DXA },
+            borders: noBorders,
+            children: list,
+            margins: { top: 100, bottom: 100, left: 100, right: 100 },
+            verticalAlign: VerticalAlign.TOP,
+          });
           cells.push(
             new TableCell({
               width: { size: cw, type: WidthType.DXA },
@@ -326,15 +387,16 @@ function renderBlock(ctx: Ctx, b: Block): (Paragraph | Table)[] {
                   width: { size: cw, type: WidthType.DXA },
                   columnWidths: [cw],
                   borders: noBorders,
-                  rows: [new TableRow({ children: [cell(ctx, [head], cw, { fill: i === 0 ? ctx.c.primary : ctx.c.secondary })] }), new TableRow({ children: [cell(ctx, list, cw, { fill: ctx.card })] })],
+                  rows: [new TableRow({ children: [headCell] }), new TableRow({ children: [bodyCell] })],
                 }),
               ],
             }),
           );
         } else {
           const children: Paragraph[] = [];
-          if (c.heading) children.push(para(ctx, [run(ctx, c.heading, { bold: true, font: ctx.head, color: ctx.c.primary, size: 11 })], { after: 100 }));
-          cells.push(cell(ctx, [...children, ...list], cw, { fill: ctx.card, borders: { ...noBorders, top: { style: BorderStyle.SINGLE, size: 18, color: ctx.c.primary } } }));
+          if (c.heading) children.push(para(ctx, [run(ctx, c.heading, { bold: true, font: ctx.head, color: ctx.c.text, size: 11 })], { after: 80 }));
+          // editorial: no card fill, hairline top + vertical divider via gapCell with left border
+          cells.push(cell(ctx, [...children, ...list], cw, { borders: { ...noBorders, top: { style: BorderStyle.SINGLE, size: 4, color: ctx.c.line } } }));
         }
         if (i < cols.length - 1) cells.push(gapCell(gap));
       });
@@ -483,17 +545,30 @@ function renderBlock(ctx: Ctx, b: Block): (Paragraph | Table)[] {
 /* ------------------------------------------------------------------ */
 
 export async function renderDocx(spec: DocumentSpec): Promise<Buffer> {
-  const t = getTheme(spec.theme);
+  const resolved = resolveDesign({
+    docType: spec.docType,
+    tone: spec.tone,
+    audience: spec.audience,
+    targetPages: spec.targetPages,
+    compact: Boolean(spec.compact),
+    preferredTheme: spec.theme as any,
+    format: "docx",
+  });
+  let themeId = spec.theme as string;
+  if (themeId === "mono" && resolved.themeId !== "mono") themeId = resolved.themeId;
+  const t = getTheme(themeId);
   const c = lightColors(t);
   const k = Math.min(1, Math.max(0.6, spec.density ?? 1));
-  const compact = Boolean(spec.compact);
+  const wantCover = resolved.useCover;
+  const compact = wantCover ? false : Boolean(spec.compact);
 
   const pageW = spec.pageSize === "Letter" ? 12240 : 11906;
   const pageH = spec.pageSize === "Letter" ? 15840 : 16838;
   const margin = Math.round((compact ? 1000 : 1300) * (0.86 + 0.14 * k));
+  const displayHead = resolved.allowCursive && t.displayFont ? t.displayFont : t.fonts.heading;
   const ctx: Ctx = {
     c,
-    head: t.fonts.heading,
+    head: displayHead,
     body: t.fonts.body,
     contentWidth: pageW - margin * 2,
     k,
@@ -505,7 +580,12 @@ export async function renderDocx(spec: DocumentSpec): Promise<Buffer> {
   const content = spec.blocks.filter((b) => b.layout !== "cover" && b.layout !== "agenda" && b.layout !== "section");
   const children: (Paragraph | Table)[] = compact ? compactHeader(ctx, spec, coverBlock) : coverPage(ctx, spec, coverBlock);
   if (!compact && (spec.targetPages ?? 0) >= 6 && content.length >= 5) children.push(...contents(ctx, content.map((b) => b.title)));
-  content.forEach((b) => children.push(...renderBlock(ctx, b)));
+  const targetPages = spec.targetPages ?? 1;
+  content.forEach((b) => {
+    const wantsBreak = Boolean((b as any).breakBefore) && targetPages > 1;
+    if (wantsBreak) children.push(new Paragraph({ children: [new PageBreak()] }));
+    children.push(...renderBlock(ctx, b));
+  });
 
   const singlePage = compact && (spec.targetPages ?? 0) <= 1;
   const bodySize = Math.round((compact ? 10 : 10.5) * 2 * k);
@@ -514,6 +594,7 @@ export async function renderDocx(spec: DocumentSpec): Promise<Buffer> {
     creator: spec.author ?? "Folio",
     title: spec.title,
     description: spec.subtitle ?? spec.docType,
+    background: c.bg.toUpperCase() !== "FFFFFF" ? { color: c.bg } : undefined,
     styles: {
       default: { document: { run: { font: t.fonts.body, size: bodySize, color: c.text } } },
       paragraphStyles: [
@@ -528,7 +609,7 @@ export async function renderDocx(spec: DocumentSpec): Promise<Buffer> {
             {
               level: 0,
               format: LevelFormat.BULLET,
-              text: "\u2022",
+              text: resolved.bulletStyle === "squircle" ? "\u25AA" : resolved.bulletStyle === "hollow" ? "\u25CB" : resolved.bulletStyle === "dash" ? "\u2013" : resolved.bulletStyle === "square" ? "\u25AA" : "\u2022",
               alignment: AlignmentType.LEFT,
               style: { paragraph: { indent: { left: compact ? 400 : 520, hanging: 260 } }, run: { color: c.primary } },
             },
@@ -549,9 +630,9 @@ export async function renderDocx(spec: DocumentSpec): Promise<Buffer> {
               default: new Header({
                 children: [
                   new Paragraph({
-                    alignment: AlignmentType.RIGHT,
-                    children: [run(ctx, spec.title, { size: 8, color: c.muted })],
+                    alignment: AlignmentType.CENTER,
                     border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: c.line, space: 4 } },
+                    children: [],
                   }),
                 ],
               }),
@@ -564,7 +645,7 @@ export async function renderDocx(spec: DocumentSpec): Promise<Buffer> {
                 children: [
                   new Paragraph({
                     alignment: AlignmentType.CENTER,
-                    children: [new TextRun({ children: ["Page ", PageNumber.CURRENT, " of ", PageNumber.TOTAL_PAGES], size: 16, color: c.muted, font: t.fonts.body })],
+                    children: [new TextRun({ children: [PageNumber.CURRENT], size: 14, color: c.muted, font: t.fonts.body })],
                   }),
                 ],
               }),

@@ -32,7 +32,7 @@ function addText(slide: PptxGenJS.Slide, deck: DeckScene, t: TextPrim) {
     text: p,
     options: {
       ...font,
-      bullet: t.bullets ? { indent: 18 } : undefined,
+      bullet: t.bullets ? ({ indent: 18, type: "square" } as any) : undefined,
       breakLine: !t.bullets && i < t.paragraphs.length - 1,
       paraSpaceAfter: t.size * t.paraGap,
     },
@@ -42,20 +42,21 @@ function addText(slide: PptxGenJS.Slide, deck: DeckScene, t: TextPrim) {
 
 function addTable(slide: PptxGenJS.Slide, deck: DeckScene, t: TablePrim) {
   const none: PptxGenJS.BorderProps = { type: "none" };
-  const headerBorder: [PptxGenJS.BorderProps, PptxGenJS.BorderProps, PptxGenJS.BorderProps, PptxGenJS.BorderProps] = [none, none, { type: "solid", pt: 1.5, color: t.headerRule }, none];
-  const rowBorder: [PptxGenJS.BorderProps, PptxGenJS.BorderProps, PptxGenJS.BorderProps, PptxGenJS.BorderProps] = [none, none, { type: "solid", pt: 0.5, color: t.rowRule }, none];
+  // tabledesign.png: header 0.9pt text, rows 0.35pt line, minimal pad
+  const headerBorder: [PptxGenJS.BorderProps, PptxGenJS.BorderProps, PptxGenJS.BorderProps, PptxGenJS.BorderProps] = [none, none, { type: "solid", pt: 0.9, color: t.headerRule }, none];
+  const rowBorder: [PptxGenJS.BorderProps, PptxGenJS.BorderProps, PptxGenJS.BorderProps, PptxGenJS.BorderProps] = [none, none, { type: "solid", pt: 0.35, color: t.rowRule }, none];
   const face = fontName(deck, t.font);
   const rows: PptxGenJS.TableRow[] = [];
   if (t.headers.length) {
     rows.push(
       t.headers.map((h) => ({
         text: h,
-        options: { bold: true, color: t.headerColor, fill: { color: t.headerFill }, fontFace: face, fontSize: t.size, valign: "middle", margin: 0.08, border: headerBorder },
+        options: { bold: true, color: t.headerColor, fill: { color: t.headerFill }, fontFace: face, fontSize: t.size, valign: "middle", margin: 0.06, border: headerBorder },
       })),
     );
   }
   for (const r of t.rows) {
-    rows.push(r.map((c) => ({ text: c, options: { color: t.textColor, fill: { color: t.fill }, fontFace: face, fontSize: t.size, valign: "middle", margin: 0.08, border: rowBorder } })));
+    rows.push(r.map((c) => ({ text: c, options: { color: t.textColor, fill: { color: t.fill }, fontFace: face, fontSize: t.size, valign: "middle", margin: 0.06, border: rowBorder } })));
   }
   slide.addTable(rows, { x: t.x, y: t.y, w: t.w, colW: t.colW, autoPage: false });
 }

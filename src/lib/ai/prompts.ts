@@ -22,23 +22,27 @@ Respond with exactly ONE JSON object in one of these shapes:
 
 ## Decision rules
 - Read the whole conversation and any attached source material. Identify: deliverable (slides / Word document / PDF), topic, purpose, audience, length, tone, language, must-have content and constraints.
-- Ask questions ONLY about things that materially change the result AND that the user has not already stated or implied. Good reasons: the topic is broad and needs an angle, the audience level is unknown, the format is ambiguous, essential facts are missing (e.g. a resume with no work history and no attached CV). Never ask about colors, fonts or design — the design system is fixed. Never ask about length when the deliverable has a standard length (see Length). Never ask what you can sensibly infer.
- - 2 to 4 questions per round, each with 2–5 concrete options tailored to THIS request (e.g. for "explain the sun": "Structure & layers", "Nuclear fusion & energy", "Life cycle", "Effects on Earth") plus a recommended option. Put the most important question first. Use allowMultiple:true when several options can be combined.
- - For each question choose the best input style and set "ui": "radio" for single pick, "checkbox" for multi-pick (allowMultiple:true), "hybrid" for options + free-text Other (most common), "text" when open-ended. Add "placeholder" for the free-text field when ui is hybrid/text (e.g., "e.g., investor audience, age 30-45"). The UI will show one question at a time with Next / Decide for me, so make each question self-contained.
-- If the request already contains enough to produce a strong result, or the user says "just do it", "you decide", "surprise me", "use defaults", "skip", or has answered a round of questions → return the outline. Do not ask a second round unless the answers created genuine new ambiguity.
+- **MANDATORY single-turn gate — format & length in ONE round, but LAST:** All clarify responses must be **a single turn** (one JSON) even when both format and length are missing. Never split format and length across two rounds. **Always put substantive questions first; format is second-last, length is absolute last.**
+  - If format is missing (preferredFormat is "auto" AND no pdf/pptx/docx/slides/word/ppt/word mentioned in conversation), include a format question as the **second-last** question: {"id":"format","question":"Which format?","options":["PDF","PPTX Slides","DOCX Word"], "recommended": "<best for docType>", "ui":"radio"}. If preferredFormat is already set (e.g. "pptx" from quick-start pill), **do NOT ask format**.
+  - If length is missing (no number of pages/slides stated AND lengthSource would be inferred), include a length question as the **LAST** question in the SAME round: if format is now known (from pill/text/just-asked or as previous question), tailor it — pptx: {"id":"length","question":"How many slides?","options":["6","10-12","15"], "recommended":"10-12", "ui":"hybrid","placeholder":"e.g., 12 slides"}; docx/pdf: {"id":"length","question":"How long?","options":["1 page","2-4 pages","6 pages"], "recommended":"2-4 pages", "ui":"hybrid","placeholder":"e.g., 5 pages"}. If the user already stated length, **do NOT ask length**.
+  - When both are missing, the single clarify must contain **substantive first, then Q_format second-last, Q_length last** (max 4 total). Example for "explain the sun" with no format/length: 3 questions in one round: Q1 focus (hybrid: "Structure & layers" etc), Q2 format (radio), Q3 length (hybrid, tailored to format just asked). When only length is missing and format was via pill (e.g. Report slides pptx), the single clarify contains **substantive first, then Q_length last** plus any substantive focus if genuinely ambiguous — do NOT ask format.
+- Ask substantive questions ONLY about things that materially change the result AND not already stated/implied (topic angle, audience level, missing facts). Never ask about colors/fonts/design — fixed. Never ask what you can infer beyond the mandatory format/length above.
+  - 1 to 4 questions per SINGLE round, each with 2–5 concrete options (e.g. for "explain the sun": "Structure & layers" etc) plus recommended. Most important substantive first, but **format second-last and length absolute last always**. Use allowMultiple:true when combinable.
+  - For each question choose ui: "radio" single, "checkbox" multi, "hybrid" options+Other (most common), "text" open. Add placeholder for hybrid/text. Each self-contained.
+- If the request already contains enough to produce a strong result, or the user says "just do it", "you decide", "surprise me", "use defaults", "skip", or has answered a round → return the outline. Do not ask a second round unless answers created genuine new ambiguity.
 ${mustOutline ? '- You have used all clarification rounds. You MUST return kind "outline" now using sensible defaults for anything unknown.' : `- Clarification rounds remaining: ${roundsLeft}.`}
 ${opts.hasOutline ? '- An outline already exists (see "Current outline"). The user may have edited it by hand or changed settings (format, length, page size, audience) — treat that version as the source of truth and preserve its targetLength and lengthSource unless the user asks to change the length. When they ask for changes, return the FULL updated outline with kind "outline", apply the change precisely, keep everything else intact, and keep section ids stable where the section survives. If they merely ask a question about it, use kind "reply".' : ""}
 ${opts.hasAttachments ? "- Attached files are provided. Treat them as the primary source: base the topic, facts and structure on them and mention in your message that you used them. For a resume/CV built from an attached CV, reuse the person's real roles, dates, schools and skills." : ""}
-${opts.hasAttachments ? `- When file(s) attached and user intent is vague (e.g., "explain this", "what is this", "describe this", "identify what's wrong", "review this proposal", "summarize", "what does this say", "critique", "extract", "find issues") without explicit format/focus/audience/length, you MUST return kind "clarify" with **exactly 1 question per round**, never combine Format + Length. Do NOT explain the file inline — we are a document generator, not a chat assistant: convert the request into a document.
-  **Separate rounds, 1 question each — never combine:**
-  · If neither format nor length specified: R1 = Format alone (Q: "Which format? PDF [Rec] | PPTX Slides | DOCX Word" ui:radio). After user answers format → R2 = Length alone (if PDF/DOCX: "How long? 1 page | 2-4 pages [Rec] | 6 pages | Custom" ui:hybrid placeholder "e.g., 5 pages"; if PPTX: "How many slides? 6 | 10-12 [Rec] | 15 | Custom" ui:hybrid placeholder "e.g., 12 slides"). Then outline.
-  · If format already known (pill preferredFormat or prompt contains "pdf/docx/pptx/slides/pages") and length not specified → R1 = Length alone (as above, tailored to format).
-  · If length already specified (prompt contains "\\d+ page/slide") and format not specified → R1 = Format alone.
-  · If both known but focus vague ("explain this" with no focus) → R1 = Focus alone (Q: "What to focus? Whole document | Key concepts | Section breakdown | Actionable takeaways" ui:hybrid placeholder "e.g., key concepts").
-  Examples:
-  · "explain this" + file, no format/length → R1 Format (1Q) → user "pdf" → R2 Length (1Q hybrid) → outline.
-  · "summarize this 2-page Word" + file (length+format known) → R1 Focus alone (1Q) if needed, else outline directly.
-  · "identify what's wrong / critique" + file → R1 goal (checkbox, All) → R2 depth (radio) but still 1Q per round if length missing, keep separate.` : ""}
+${opts.hasAttachments ? `- When file(s) attached and user intent is vague (e.g., "explain this", "what is this", "describe this", "identify what's wrong", "review this proposal", "summarize", "what does this say", "critique", "extract", "find issues") without explicit format/focus/audience/length, you MUST return kind "clarify" in a **single turn** (combine, never split). Do NOT explain the file inline — we are a document generator: convert to a document.
+  **Single-turn composition — substantive first, format second-last, length last (max 3-4 questions):**
+  · If neither format nor length specified: include Q_focus (hybrid) FIRST, then Q_format (radio: PDF | PPTX Slides | DOCX Word) second-last, Q_length (hybrid, tailored) last in the same round.
+  · If format already known (pill preferredFormat or prompt contains "pdf/docx/pptx/slides/pages") and length not specified → include Q_focus (if needed) FIRST, then Q_length last in same round.
+  · If length already specified and format not specified → include Q_focus FIRST, then Q_format last.
+  · If both known but focus vague → include Q_focus alone (hybrid).
+  Examples (now single turn, last is length):
+  · "explain this" + file, no format/length → 1 round with 3 Qs: Q1 focus (hybrid) + Q2 format (radio) + Q3 length (hybrid) → outline.
+  · "summarize this 2-page Word" + file (length+format known) → 1 round with focus alone (1Q) if needed, else outline directly.
+  · "identify what's wrong" + file → 1 round with Q1 focus/goal (checkbox) FIRST, then Q2 depth (radio) — keep substantive order, and if format/length also missing they go last.` : ""}
 ${opts.preferredFormat && opts.preferredFormat !== "auto" ? `- The user pre-selected the format "${opts.preferredFormat}" in the UI. Use it and do not ask about format.` : ""}
 - Write in the user's language. Keep messages short, warm and professional. No emojis.
 
@@ -132,12 +136,21 @@ Quiz rules: quiz layout → 8–20 questions per block; mcq = 4 options (A-D), t
 
 ${
   isDeck
-    ? `## Rules for slides
-- Titles ≤ 8 words, written as a message where possible ("Fusion Powers Everything We See").
-- bullets: 3–6 per slide, ≤ 14 words each, parallel structure, no trailing periods, no sub-bullets.
-- two-column: exactly 2 columns with headings and 2–4 bullets each. groups: 2–3 entries per slide, each with heading, meta and 2–3 short bullets. stats: 3–4 items with short labels. timeline: 3–5 steps. comparison: exactly 2 columns (e.g. "Before/After") with 3–5 bullets each. table: ≤ 5 columns and ≤ 6 rows, short cells. quote: ≤ 35 words with attribution. section: title + one-line subtitle only. agenda: bullets = the titles of the main content slides.
-- cover: title + subtitle only. closing: title such as "Key Takeaways" or "Next Steps", 3–4 bullets, and a callout with the single most important message or call to action.
-- Every content slide gets "notes": 2–4 sentences the presenter would actually say, adding detail that is not on the slide.`
+    ? `## Rules for slides — editorial, clean, premium (Sara's archive refs)
+- Density: ≤ 60 words per content slide. Titles ≤ 7 words. Aim for breathing room — better to have 3 strong bullets than 6 crowded ones. Design matches pptxref: large condensed heading + short body, airy whitespace.
+- bullets: 3–5 bullets, 8–12 words each, parallel, no periods, no sub-bullets. Square bullets in render. This is the normalcontent.png density.
+- two-column: 2 columns when comparing A/B or pairing ideas; 3 columns when topic has 3 pillars (People/Process/Tech). Each column: heading (1–3 words caps) + 2–3 bullets of 8–11 words. Same token set for 2 or 3 cols (hairline dividers, centered dash under heading) — mutiplecolumn.png + separatordesign.png.
+- groups: 2–4 entries per slide (4-col pricing grid for plans/tiers uses groups with 4 entries, each heading + 2–3 bullets). Centered card boxes with thin stroke, title + dash + description — separatordesign.png.
+- stats: 2–4 items, headline figure ≤ 10 chars, label ≤ 5 words, description ≤ 10 words.
+- timeline: 3–5 steps, label ≤ 6 words, description ≤ 12 words. Steps sit on a single horizontal hairline with black 01 squares. Choose horizontal timeline for processes/journeys — timelinedesign.png vs projecttimeline2.png (icon ticks). Never use timeline for non-process content.
+- comparison: exactly 2 columns (e.g. Before/After) with 3–4 bullets each, hairline header only, vertical divider.
+- table: ≤ 5 columns and ≤ 6 rows, header ≤ 4 words, cell ≤ 8 words. Horizontal rules only, no fills — tabledesign.png.
+- quote: ≤ 28 words with attribution, left bar minimal, large serif quote.
+- section: title + 1-line subtitle only (divider slide, used sparingly for decks ≥ 15 slides).
+- agenda: bullets = deduped titles of main content slides (7+ content slides only).
+- cover: editorial shell — huge centered condensed title, subtitle, up to 3 pill capsules. Two shells rotate: light (#F5F5F5) centered-pill (pptxheader1.png) vs dark (#0A0A0B left-stacked, pptxheader2.png). Closing mirrors cover shell (same rules, centered title/subtitle) but shows closing content and has NO pills — same cream/grey vs dark inversion per rotation.
+- callout: OPTIONAL, 1 sentence only, only when the slide truly needs a highlighted insight — otherwise omit. Never auto-generate "Key takeaway / In focus" cards.
+- Every content slide gets "notes": 2–4 sentences the presenter would actually say, adding detail not on slide.`
     : `## Length budget — hard limit
 This ${outline.docType} must fit in ${outline.targetLength} page${outline.targetLength === 1 ? "" : "s"} (${outline.pageSize}). ${
         plan.compact
@@ -194,11 +207,13 @@ export function outlineToPromptText(outline: Outline, sections: OutlineSection[]
   return `${meta}\n\nSections to write now:\n${secs}`;
 }
 
-export function attachmentsToPromptText(attachments: { name: string; text: string }[] | undefined, budgetChars: number): string {
+export function attachmentsToPromptText(attachments: { name: string; text: string; dataUrl?: string; isImage?: boolean }[] | undefined, budgetChars: number): string {
   if (!attachments?.length) return "";
   const per = Math.max(2000, Math.floor(budgetChars / attachments.length));
   return attachments
     .map((a) => {
+      const isImg = (a as any).isImage || (a as any).dataUrl;
+      if (isImg) return `<file name="${a.name}">\n[Image: ${a.name} — vision input, describe visually or OCR if needed]\n</file>`;
       const text = a.text.length > per ? `${a.text.slice(0, per)}\n[... truncated, ${a.text.length - per} more characters]` : a.text;
       return `<file name="${a.name}">\n${text}\n</file>`;
     })

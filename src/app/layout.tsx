@@ -8,6 +8,10 @@ import { ErrorProvider, ErrorProviderBridge } from "@/lib/error/store";
 export const metadata: Metadata = {
   title: "Folio — AI decks and documents",
   description: "Turn a prompt or your files into polished PPTX, DOCX and PDF documents.",
+  icons: {
+    icon: [{ url: "/icon.svg", type: "image/svg+xml" }],
+    apple: [{ url: "/apple-icon.svg", type: "image/svg+xml" }],
+  },
 };
 
 export const viewport: Viewport = {

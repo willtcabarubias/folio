@@ -3,8 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Bot, Check, Loader2, MessageSquare, Paperclip, ScanEye, Sparkles } from "lucide-react";
-import { ApiError, askAgent, downloadBlob, expandOutline, expandOutlineStream, extractFile, renderFile, renderPreview, reportApiError, safeName, specToMarkdown } from "@/lib/client/api";
-import { rasterizePdf } from "@/lib/client/pdf";
+import { ApiError, askAgent, downloadBlob, expandOutline, expandOutlineStream, extractFile, renderFile, renderPreview, reportApiError } from "@/lib/client/api";
 import type { AgentResponse, Attachment, ChatTurn, DocumentSpec, Format, Outline } from "@/lib/spec/types";
 import { getProject, newId, saveProject, type Project } from "@/lib/store/projects";
 import { ChatThread, type ThreadMessage } from "./ChatThread";
@@ -177,8 +176,35 @@ export function Builder({ id }: { id: string }) {
 
   /* ---------------- attachments ---------------- */
 
+  const fileToDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result as string);
+      r.onerror = () => reject(new Error("Failed to read image"));
+      r.readAsDataURL(file);
+    });
+
   const addFiles = useCallback(async (files: FileList | File[]) => {
     for (const file of Array.from(files).slice(0, 6)) {
+      if (file.type.startsWith("image/")) {
+        if (file.size > 4 * 1024 * 1024) {
+          const fid = newId("f");
+          setAttachments((prev) => [...prev, { id: fid, name: file.name, size: file.size, kind: "image", text: "", chars: 0, status: "error" as const, error: "Image too large (max 4 MB)" }]);
+          reportApiError(new Error("Image too large"), "Image too large (max 4 MB)", "api:extract");
+          continue;
+        }
+        const fid = newId("f");
+        setAttachments((prev) => [...prev, { id: fid, name: file.name, size: file.size, kind: "image", text: "", chars: 0, status: "extracting" as const }]);
+        try {
+          const dataUrl = await fileToDataUrl(file);
+          setAttachments((prev) => prev.map((a) => (a.id === fid ? { ...a, status: "ready" as const, dataUrl, mimeType: file.type, isImage: true } : a)));
+        } catch (err) {
+          reportApiError(err, "Could not read image", "api:extract");
+          const message = err instanceof Error ? err.message : "Could not read image";
+          setAttachments((prev) => prev.map((a) => (a.id === fid ? { ...a, status: "error" as const, error: message } : a)));
+        }
+        continue;
+      }
       const fid = newId("f");
       setAttachments((prev) => [...prev, { id: fid, name: file.name, size: file.size, kind: "", text: "", chars: 0, status: "extracting" }]);
       try {
@@ -278,7 +304,7 @@ export function Builder({ id }: { id: string }) {
       for await (const evt of expandOutlineStream({
         outline: target,
         transcript: tr,
-        attachments: allReadyAttachments.map((a) => ({ name: a.name, text: a.text })),
+        attachments: allReadyAttachments.map((a) => ({ name: a.name, text: a.text, ...(a.dataUrl ? { dataUrl: a.dataUrl, mimeType: a.mimeType, isImage: true } : {}) })),
       })) {
         if (evt.type === "block") {
           setSpec((prev) => {
@@ -358,7 +384,7 @@ export function Builder({ id }: { id: string }) {
       try {
         const response = await askAgent({
           messages: list.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.role === "assistant" ? compactResponse(m.response, m.text) : m.text })),
-          attachments: files.filter((a) => a.status === "ready").map((a) => ({ name: a.name, text: a.text })),
+          attachments: files.filter((a) => a.status === "ready").map((a) => ({ name: a.name, text: a.text, ...(a.dataUrl ? { dataUrl: a.dataUrl, mimeType: a.mimeType, isImage: true } : {}) })),
           currentOutline,
           preferredFormat: preferred,
         });
@@ -496,26 +522,11 @@ export function Builder({ id }: { id: string }) {
     if (!s || exporting) return;
     setExporting(kind);
     try {
-      if (kind === "md") {
-        downloadBlob(new Blob([specToMarkdown(s)], { type: "text/markdown;charset=utf-8" }), `${safeName(s.title)}.md`);
-      } else if (kind === "png") {
-        const data = preview && preview.format === s.format ? preview.data : await renderPreview(s, s.format);
-        const pages = await rasterizePdf(data, { width: s.format === "pptx" ? 1920 : 1654, type: "image/png" });
-        if (pages.length === 1) downloadBlob(pages[0].blob, `${safeName(s.title)}.png`);
-        else {
-          const JSZip = (await import("jszip")).default;
-          const zip = new JSZip();
-          const label = s.format === "pptx" ? "slide" : "page";
-          pages.forEach((p, i) => zip.file(`${label}-${String(i + 1).padStart(2, "0")}.png`, p.blob));
-          downloadBlob(await zip.generateAsync({ type: "blob" }), `${safeName(s.title)}-images.zip`);
-        }
-      } else {
-        const { blob, fileName } = await renderFile(s, kind);
-        downloadBlob(blob, fileName);
-      }
+      const { blob, fileName } = await renderFile(s, kind);
+      downloadBlob(blob, fileName);
       showToast("Export ready");
     } catch (err) {
-      reportApiError(err, "Export failed", kind === "png" ? "client:preview" : "api:render");
+      reportApiError(err, "Export failed", "api:render");
       showToast(err instanceof Error ? err.message : "Export failed");
     } finally {
       setExporting(null);
@@ -527,11 +538,6 @@ export function Builder({ id }: { id: string }) {
       if (kind === "link") {
         await navigator.clipboard.writeText(window.location.href);
         showToast("Link copied");
-      } else if (kind === "text") {
-        const s = currentSpec();
-        const text = s ? specToMarkdown(s) : outline ? `# ${outline.title}\n\n${outline.sections.map((x, i) => `${i + 1}. ${x.title}\n${x.points.map((p) => `   - ${p}`).join("\n")}`).join("\n")}` : "";
-        await navigator.clipboard.writeText(text);
-        showToast("Copied as text");
       } else {
         const s = currentSpec();
         if (!s) return;
@@ -590,6 +596,7 @@ export function Builder({ id }: { id: string }) {
         onExport={exportAs}
         onShare={share}
         canShareFile={Boolean(spec)}
+        originFormat={(spec as any)?.originFormat || spec?.format}
         status={
           readyFiles > 0 ? (
             <span className="chip chip-brand hidden md:inline-flex">
@@ -601,20 +608,20 @@ export function Builder({ id }: { id: string }) {
       />
 
         {planning ? (
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="scroll-thin flex-1 overflow-y-auto px-4 md:px-6">
             <div className="mx-auto w-full max-w-3xl py-6 md:py-5">
               <ChatThread messages={messages} busy={busy} onAnswer={onAnswer} onSkip={onSkip} onRetry={retry} />
             </div>
           </div>
-          <div className={`px-4 pb-5 pt-2 md:px-6 md:pb-4 ${hasPendingClarify ? "hidden" : ""}`}>
+          <div className={`shrink-0 border-t border-line/30 bg-white/90 px-4 pb-[max(12px,env(safe-area-inset-bottom))] pt-2 backdrop-blur supports-[backdrop-filter]:bg-white/80 md:border-0 md:bg-transparent md:px-6 md:pb-4 md:pt-2 md:backdrop-blur-none ${hasPendingClarify ? "hidden" : ""}`}>
             <div className="mx-auto w-full max-w-3xl">
               <PromptBox value={input} onChange={setInput} onSubmit={() => send(input)} onFiles={addFiles} attachments={attachments} onRemoveAttachment={(fid) => setAttachments((p) => p.filter((a) => a.id !== fid))} busy={busy || attachments.some((a) => a.status === "extracting")} placeholder={attachments.some((a) => a.status === "extracting") ? "Extracting file… please wait" : "Reply or add details"} />
             </div>
           </div>
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Pane switcher (small screens) — chat/doc only, no settings */}
           <div className="flex items-center justify-center border-b border-line/40 bg-white px-3 py-2 lg:hidden">
             <div className="flex rounded-full bg-[#f4f6f4] p-0.5 ring-1 ring-line/40">
@@ -655,7 +662,7 @@ export function Builder({ id }: { id: string }) {
                 )}
                 <ChatThread messages={previewChatMessages} busy={busy || generating} busyHint={generating ? "Composing" : undefined} compact onAnswer={onAnswer} onSkip={onSkip} onRetry={retry} />
               </div>
-              <div className={`px-3 pb-3 pt-1 md:px-2.5 md:pb-2.5 ${hasPreviewPendingClarify ? "hidden" : ""}`}>
+              <div className={`shrink-0 border-t border-line/30 bg-white/90 px-3 pb-[max(12px,env(safe-area-inset-bottom))] pt-2 backdrop-blur supports-[backdrop-filter]:bg-white/60 md:border-0 md:bg-white/60 md:px-2.5 md:pb-2.5 md:pt-1 ${hasPreviewPendingClarify ? "hidden" : ""}`}>
                 <PromptBox value={input} onChange={setInput} onSubmit={() => send(input)} onFiles={addFiles} attachments={attachments} onRemoveAttachment={(fid) => setAttachments((p) => p.filter((a) => a.id !== fid))} busy={busy || generating || attachments.some((a) => a.status === "extracting")} placeholder={attachments.some((a) => a.status === "extracting") ? "Extracting file… please wait" : generating ? "File is updating — please wait" : "Ask for changes"} />
               </div>
             </aside>

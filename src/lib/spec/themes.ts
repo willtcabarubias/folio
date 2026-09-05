@@ -1,5 +1,8 @@
 import type { ThemeId } from "./types";
 
+export type Ornament = "none" | "lines-diagonal" | "wave" | "dots" | "grid" | "pill";
+export type BulletStyle = "dot" | "hollow" | "dash" | "square" | "squircle";
+
 export type Theme = {
   id: ThemeId;
   name: string;
@@ -18,9 +21,14 @@ export type Theme = {
     line: string;
   };
   fonts: { heading: string; body: string };
-  pdfFonts: { heading: string; body: string; italic: string; bold: string };
-  /** Dark slide backgrounds throughout (documents always stay light). */
+  /** Optional display/cursive for covers when mood allows (falls back to heading if not embedded). */
+  displayFont?: string;
+  pdfFonts: { heading: string; body: string; italic: string; bold: string; display?: string };
+  /** Dark slide backgrounds throughout (documents always stay light unless mood=dark). */
   dark: boolean;
+  /** Ornament + bullet system extracted from reference patterns. */
+  ornament: Ornament;
+  bulletStyle: BulletStyle;
   /** Swatch used in the UI. */
   swatch: [string, string];
 };
@@ -50,6 +58,8 @@ export const THEMES: Record<ThemeId, Theme> = {
     fonts: SANS,
     pdfFonts: HELV,
     dark: false,
+    ornament: "none",
+    bulletStyle: "dot",
     swatch: ["#111827", "#9CA3AF"],
   },
   azure: {
@@ -71,6 +81,8 @@ export const THEMES: Record<ThemeId, Theme> = {
     fonts: SANS,
     pdfFonts: HELV,
     dark: false,
+    ornament: "none",
+    bulletStyle: "dot",
     swatch: ["#2F5BEA", "#7AA2FF"],
   },
   executive: {
@@ -82,8 +94,8 @@ export const THEMES: Record<ThemeId, Theme> = {
       primary: "0F2A4A",
       secondary: "1F4E79",
       accent: "D4A853",
-      bg: "F7F6F2",
-      surface: "FFFFFF",
+      bg: "FFFFFF",
+      surface: "F8F9FA",
       text: "16202E",
       muted: "6E7684",
       onPrimary: "FFFFFF",
@@ -92,6 +104,8 @@ export const THEMES: Record<ThemeId, Theme> = {
     fonts: SERIF_HEAD,
     pdfFonts: TIMES_HEAD,
     dark: false,
+    ornament: "none",
+    bulletStyle: "dot",
     swatch: ["#0F2A4A", "#D4A853"],
   },
   academic: {
@@ -103,16 +117,18 @@ export const THEMES: Record<ThemeId, Theme> = {
       primary: "2B2D42",
       secondary: "5C6378",
       accent: "C8553D",
-      bg: "FAF8F4",
-      surface: "FFFFFF",
+      bg: "FFF9F0",
+      surface: "FFFCF5",
       text: "22242F",
       muted: "737A8C",
       onPrimary: "FFFFFF",
-      line: "E6E2D8",
+      line: "E8E0D2",
     },
     fonts: SERIF_HEAD,
     pdfFonts: TIMES_HEAD,
     dark: false,
+    ornament: "lines-diagonal",
+    bulletStyle: "dot",
     swatch: ["#2B2D42", "#C8553D"],
   },
   midnight: {
@@ -134,6 +150,8 @@ export const THEMES: Record<ThemeId, Theme> = {
     fonts: SANS,
     pdfFonts: HELV,
     dark: true,
+    ornament: "none",
+    bulletStyle: "dot",
     swatch: ["#0B1020", "#5B8CFF"],
   },
   coral: {
@@ -155,6 +173,8 @@ export const THEMES: Record<ThemeId, Theme> = {
     fonts: SANS,
     pdfFonts: HELV,
     dark: false,
+    ornament: "dots",
+    bulletStyle: "dot",
     swatch: ["#E4572E", "#F3A712"],
   },
   forest: {
@@ -176,6 +196,8 @@ export const THEMES: Record<ThemeId, Theme> = {
     fonts: SANS,
     pdfFonts: HELV,
     dark: false,
+    ornament: "pill",
+    bulletStyle: "dot",
     swatch: ["#2D6A4F", "#52B788"],
   },
   slate: {
@@ -187,8 +209,8 @@ export const THEMES: Record<ThemeId, Theme> = {
       primary: "1F2937",
       secondary: "4B5563",
       accent: "3B82F6",
-      bg: "F8FAFC",
-      surface: "FFFFFF",
+      bg: "FFFFFF",
+      surface: "F8FAFC",
       text: "111827",
       muted: "6B7280",
       onPrimary: "FFFFFF",
@@ -197,6 +219,8 @@ export const THEMES: Record<ThemeId, Theme> = {
     fonts: { heading: "Arial", body: "Arial" },
     pdfFonts: HELV,
     dark: false,
+    ornament: "none",
+    bulletStyle: "hollow",
     swatch: ["#1F2937", "#3B82F6"],
   },
   plum: {
@@ -218,7 +242,79 @@ export const THEMES: Record<ThemeId, Theme> = {
     fonts: SANS,
     pdfFonts: HELV,
     dark: false,
+    ornament: "grid",
+    bulletStyle: "dot",
     swatch: ["#5B21B6", "#8B5CF6"],
+  },
+  warm: {
+    id: "warm",
+    name: "Warm Paper",
+    description: "Cream paper #FFF9F0 with ink and warm lines — editorial, calm, printable",
+    bestFor: "essays, study guides, comparative essays, reading handouts, humanities",
+    colors: {
+      primary: "1F2937",
+      secondary: "4B5563",
+      accent: "F3EFE6",
+      bg: "FFF9F0",
+      surface: "FFFCF5",
+      text: "1C1E26",
+      muted: "6B7280",
+      onPrimary: "FFFFFF",
+      line: "E8E0D2",
+    },
+    fonts: SERIF_HEAD,
+    displayFont: "Caveat",
+    pdfFonts: { ...TIMES_HEAD, display: "Helvetica-Oblique" },
+    dark: false,
+    ornament: "lines-diagonal",
+    bulletStyle: "squircle",
+    swatch: ["#FFF9F0", "#E8E0D2"],
+  },
+  noir: {
+    id: "noir",
+    name: "Noir",
+    description: "Soft black editorial — premium, formal, high contrast",
+    bestFor: "formal reports, manuals, executive summaries, certificates",
+    colors: {
+      primary: "E8ECF8",
+      secondary: "A1AEC6",
+      accent: "2A2E3A",
+      bg: "0A0A0B",
+      surface: "16161A",
+      text: "F8FAFC",
+      muted: "9AA3B5",
+      onPrimary: "0A0A0B",
+      line: "2E333E",
+    },
+    fonts: SANS,
+    pdfFonts: HELV,
+    dark: true,
+    ornament: "none",
+    bulletStyle: "dash",
+    swatch: ["#0A0A0B", "#2E333E"],
+  },
+  cool: {
+    id: "cool",
+    name: "Cool Blue",
+    description: "Cool blue paper — calm, tech, modern classroom",
+    bestFor: "science, tech, cool-tone planners, blue-themed docs",
+    colors: {
+      primary: "102A6B",
+      secondary: "3B82F6",
+      accent: "DBEAFE",
+      bg: "EFF6FF",
+      surface: "FFFFFF",
+      text: "0F172A",
+      muted: "64748B",
+      onPrimary: "FFFFFF",
+      line: "BFDBFE",
+    },
+    fonts: SANS,
+    pdfFonts: HELV,
+    dark: false,
+    ornament: "pill",
+    bulletStyle: "dot",
+    swatch: ["#EFF6FF", "#3B82F6"],
   },
 };
 

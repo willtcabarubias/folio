@@ -9,23 +9,29 @@ export const MAX_FILE_BYTES = 15 * 1024 * 1024;
 export const MAX_TEXT_CHARS = 120_000;
 
 const TEXT_EXT = new Set(["txt", "md", "markdown", "csv", "tsv", "json", "html", "htm", "xml", "yaml", "yml", "log", "rtf", "tex"]);
+const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg", "heic", "heif", "avif"]);
 
 export function fileKind(name: string, mime: string): string {
   const ext = (name.split(".").pop() || "").toLowerCase();
   if (ext === "pdf" || mime === "application/pdf") return "pdf";
   if (ext === "docx" || mime.includes("wordprocessingml")) return "docx";
   if (ext === "pptx" || mime.includes("presentationml")) return "pptx";
+  if (IMAGE_EXT.has(ext) || mime.startsWith("image/")) return "image";
   if (TEXT_EXT.has(ext) || mime.startsWith("text/") || mime === "application/json") return ext || "txt";
   return "unsupported";
 }
 
 export async function extractText(buffer: Buffer, name: string, mime: string): Promise<ExtractResult> {
   const kind = fileKind(name, mime);
-  if (kind === "unsupported") throw new Error("Unsupported file type. Use PDF, DOCX, PPTX, TXT, MD or CSV.");
+  if (kind === "unsupported") throw new Error("Unsupported file type. Use PDF, DOCX, PPTX, TXT, MD, CSV or images (PNG, JPG, WEBP).");
 
   let text = "";
   let pages: number | undefined;
 
+  if (kind === "image") {
+    // Images handled client-side via base64 + vision; return placeholder so extract route doesn't error if called
+    return { text: `[Image: ${name}]`, pages: 1, kind: "image" };
+  }
   if (kind === "pdf") {
     const { extractText: unpdfExtract } = await import("unpdf");
     const result = await unpdfExtract(new Uint8Array(buffer), { mergePages: true });
