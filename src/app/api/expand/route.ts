@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { AIError, MISSING_KEY_MESSAGE, generateStructured, isConfigured, type ChatMessage } from "@/lib/ai/client";
 import { attachmentsToPromptText, expandSystemPrompt, outlineToPromptText } from "@/lib/ai/prompts";
 import { fitToPages } from "@/lib/render/fit";
-import { blockFromOutlineSection, designPass, normalizeBlock, normalizeOutline } from "@/lib/spec/normalize";
+import { blockFromOutlineSection, designPass, normalizeBlock, normalizeOutline, pagePlan, specWordCount } from "@/lib/spec/normalize";
 import { ExpandResponseSchema, OutlineSchema, type Block, type ExpandRequest, type Outline, type OutlineSection } from "@/lib/spec/types";
 
 export const runtime = "nodejs";
@@ -74,7 +74,18 @@ export async function POST(req: Request) {
           if (failures.length === batches.length && batches.length > 0) {
             throw new AIError(`The writer could not produce content (${failures[0]})`, 502);
           }
-          let spec = designPass(outline, allBlocks, outline.format);
+          let finalBlocks = allBlocks;
+          if (!failures.length) {
+            const top = await topUpIfShort(system, context, outline, allBlocks);
+            finalBlocks = top.blocks;
+            if (top.toppedUp) {
+              for (const b of top.blocks.slice(allBlocks.length)) {
+                send({ type: "block", block: b, index: allBlocks.length });
+              }
+              if (top.warning) failures.push(top.warning);
+            }
+          }
+          let spec = designPass(outline, finalBlocks, outline.format);
           if (outline.format !== "pptx") spec = await fitToPages(spec);
           send({ type: "done", spec, warnings: failures, fit: spec.fit ?? null });
         } catch (err) {
@@ -113,7 +124,12 @@ export async function POST(req: Request) {
     if (failures.length === batches.length && batches.length > 0) {
       throw new AIError(`The writer could not produce content (${failures[0]})`, 502);
     }
-    const blocks = results.flat();
+    let blocks = results.flat();
+    if (!failures.length) {
+      const top = await topUpIfShort(system, context, outline, blocks);
+      blocks = top.blocks;
+      if (top.toppedUp && top.warning) failures.push(top.warning);
+    }
     let spec = designPass(outline, blocks, outline.format);
     if (outline.format !== "pptx") spec = await fitToPages(spec);
     return NextResponse.json({ spec, warnings: failures, fit: spec.fit ?? null });
@@ -123,6 +139,65 @@ export async function POST(req: Request) {
     const stack = err instanceof Error ? err.stack : undefined;
     console.error("[expand]", message, stack);
     return NextResponse.json({ error: message, details: stack?.slice(0, 3000), stack: stack?.slice(0, 4000) }, { status });
+  }
+}
+
+/**
+ * Document types where filler sections are never appropriate: sparse forms
+ * (invoice/receipt), personal/official one-pagers, and assessments whose
+ * structure is exact (questions + answer key). Top-up yields to an explicit
+ * user length request even here.
+ */
+const NO_TOPUP_RE = /\b(invoice|receipt|cover letter|letter|resume|cv|quiz|worksheet|certificate|checklist|agenda|memo)\b/i;
+
+/**
+ * Fill-priority top-up (ruling B): when the writer under-produces (<90% of the
+ * word budget), add ONE "Key Details" batch before the closing instead of
+ * shipping a document with a half-empty last page. Bounded: single call,
+ * max 2 blocks, skipped for decks, sparse forms, and 12+ content sections.
+ */
+async function topUpIfShort(
+  system: string,
+  context: string,
+  outline: Outline,
+  blocks: Block[],
+): Promise<{ blocks: Block[]; toppedUp: boolean; warning?: string }> {
+  if (outline.format === "pptx") return { blocks, toppedUp: false };
+  if (outline.lengthSource !== "user" && NO_TOPUP_RE.test(outline.docType)) return { blocks, toppedUp: false };
+  const budget = pagePlan(outline).wordsTotal;
+  if (!budget) return { blocks, toppedUp: false };
+  const words = specWordCount({ blocks } as unknown as Parameters<typeof specWordCount>[0]);
+  const contentCount = blocks.filter((b) => b.layout !== "cover" && b.layout !== "agenda").length;
+  if (words >= budget * 0.9 || contentCount >= 12) return { blocks, toppedUp: false };
+  const deficit = Math.max(60, Math.round(budget - words));
+  const titles = blocks.map((b) => b.title).filter(Boolean).join(" | ").slice(0, 600);
+  const wantTwo = deficit > 400;
+  try {
+    const result = await generateStructured({
+      schema: ExpandResponseSchema,
+      system,
+      messages: [
+        {
+          role: "user",
+          content: `${context ? `${context}\n\n---\n` : ""}Title: ${outline.title}\nLanguage: ${outline.language}\nExisting sections (do NOT repeat these): ${titles}\n\nThe document is about ${deficit} words short of its ${budget}-word budget and the last page would be half empty. Write ${wantTwo ? "TWO" : "ONE"} additional substantive block(s) that add genuinely new detail for "${outline.title}" (concrete examples, implications, practical next steps for a student reader). First block: id "topup1", title "Key Details & Takeaways", layout "bullets" with 4-5 bullets of 12-18 words each.${wantTwo ? ' Second block: id "topup2", title "Putting It Into Practice", layout "paragraph" with one tight paragraph.' : ""} Together they must total ~${deficit} words. Return ONLY {"blocks":[...]}.`,
+        },
+      ],
+      maxTokens: 4000,
+      temperature: 0.55,
+      label: "Writer-topup",
+    });
+    const fresh = result.blocks.slice(0, 2).map((raw, i) => {
+      const id = `topup${i + 1}`;
+      return normalizeBlock({ ...raw, id }, id, outline.format, undefined);
+    });
+    if (!fresh.length) return { blocks, toppedUp: false };
+    const out = [...blocks];
+    const closingIdx = out.findIndex((b) => b.layout === "closing");
+    if (closingIdx >= 0) out.splice(closingIdx, 0, ...fresh);
+    else out.push(...fresh);
+    return { blocks: out, toppedUp: true, warning: `Added a Key Details section (${deficit} words) to fill the pages.` };
+  } catch {
+    return { blocks, toppedUp: false };
   }
 }
 

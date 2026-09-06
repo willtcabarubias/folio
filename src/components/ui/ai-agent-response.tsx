@@ -425,15 +425,19 @@ export function StreamingText({
 }: StreamingTextProps) {
   const [shown, setShown] = React.useState("");
   const onCompleteRef = React.useRef(onComplete);
-  onCompleteRef.current = onComplete;
+  React.useEffect(() => {
+    onCompleteRef.current = onComplete;
+  });
 
   React.useEffect(() => {
+    // Codepoint-aware slicing: text.slice() splits UTF-16 surrogates (emoji) mid-pair → �.
+    const chars = Array.from(text);
+    setShown("");
     let i = 0;
     const id = setInterval(() => {
       i += chunkSize;
-      const nextText = text.slice(0, i);
-      setShown(nextText);
-      if (i >= text.length) {
+      setShown(chars.slice(0, i).join(""));
+      if (i >= chars.length) {
         clearInterval(id);
         onCompleteRef.current?.();
       }

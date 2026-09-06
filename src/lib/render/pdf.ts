@@ -109,9 +109,11 @@ class Layout {
 /*  Building blocks                                                     */
 /* ------------------------------------------------------------------ */
 
-function heading(L: Layout, text: string, size = 18) {
+function heading(L: Layout, text: string, size = 18, keepNext = 0) {
+  // keepNext reserves room for following content so a heading is never stranded
+  // alone at the bottom of a page (widow control).
   if (L.compact) {
-    L.ensure(L.S(40));
+    L.ensure(L.S(40) + keepNext);
     L.y += L.S(7);
     L.write(text.toUpperCase(), L.left, L.y, L.cw, { font: L.f.bold, size: L.S(9.5), color: L.c.primary, spacing: 1.3, lineGap: 0 });
     L.y += L.S(3.5);
@@ -119,7 +121,7 @@ function heading(L: Layout, text: string, size = 18) {
     L.y += L.S(7);
     return;
   }
-  L.ensure(size * 3.2 * L.k);
+  L.ensure(size * 3.2 * L.k + keepNext);
   L.y += L.S(10);
   L.write(text, L.left, L.y, L.cw, { font: L.f.heading, size: L.S(size), color: L.c.primary, lineGap: 1 });
   L.y += L.S(4);
@@ -172,9 +174,26 @@ function ornamentGrid(L: Layout, y0: number, h: number) {
   L.doc.restore();
 }
 
+/** Minimum trailing items kept together — never strand 1-2 bullets on the next page. */
+const BULLET_TAIL = 3;
+
 function bullets(L: Layout, items: string[], x = L.left, width = L.cw, size?: number, bulletStyle: string = "dot") {
   const fs = size ?? L.S(L.compact ? 10 : 10.5);
-  for (const item of items) {
+  const gap = L.S(L.compact ? 2.5 : 4.5);
+  const pageH = L.bottom - L.top;
+  // Pre-measure so the tail rule below can look ahead without re-measuring.
+  const hs = items.map((it) => L.measure(pdfText(it), width - 16, L.f.body, fs, L.S(2.4)) + 4 + gap);
+  for (let i = 0; i < items.length; i++) {
+    // Orphan guard: once inside the last BULLET_TAIL items, keep them together —
+    // if the whole tail no longer fits here, move it to the next page as one group.
+    if (items.length > BULLET_TAIL && i >= items.length - BULLET_TAIL) {
+      const tailH = hs.slice(i).reduce((a, h) => a + h, 0);
+      if (tailH <= pageH && L.remaining() < tailH && L.y > L.top + 1) {
+        L.doc.addPage();
+        L.y = L.top;
+      }
+    }
+    const item = items[i];
     const text = pdfText(item);
     const h = L.measure(text, width - 16, L.f.body, fs, L.S(2.4));
     L.ensure(Math.min(h, 60) + 4);
@@ -192,7 +211,7 @@ function bullets(L: Layout, items: string[], x = L.left, width = L.cw, size?: nu
       L.circle(x + 4, y + fs * 0.55, fs * 0.19, L.c.primary);
     }
     L.write(text, x + 16, y, width - 16, { size: fs, lineGap: L.S(2.4) });
-    L.y += L.S(L.compact ? 2.5 : 4.5);
+    L.y += gap;
   }
   L.y += L.S(4);
 }
@@ -364,12 +383,27 @@ function columns(L: Layout, cols: NonNullable<Block["columns"]>, comparison: boo
 
 function quizBlock(L: Layout, qs: NonNullable<Block["quiz"]>) {
   const letters = ["A", "B", "C", "D", "E", "F"];
+  const pageH = L.bottom - L.top;
   qs.forEach((q, idx) => {
     const type = q.type ?? (q.options.length <= 2 ? "tf" : "mcq");
     const num = idx + 1;
     const qText = pdfText(`${num}. ${q.question}`);
     const h = L.measure(qText, L.cw, L.f.bold, L.S(10.5), 2.4);
-    L.ensure(Math.min(h + 28, 80));
+    // Keep each question atomic: stem + options + answer travel together when they fit a page.
+    const qOpts = q.options.length ? q.options : ["True", "False"];
+    let qH = h + L.S(3) + L.S(4);
+    if (type === "identification") {
+      qH += L.S(7) + (q.explanation ? L.S(11) : 0);
+    } else {
+      for (const opt of qOpts) qH += L.measure(pdfText(`${"A"}. ${opt}`), L.cw - L.S(24), L.f.body, L.S(10), 2) + L.S(2);
+      qH += L.S(3) + (q.answer || typeof q.answerIndex === "number" ? L.S(11) : 0);
+    }
+    if (qH <= pageH && L.remaining() < qH && L.y > L.top + 1) {
+      L.doc.addPage();
+      L.y = L.top;
+    } else {
+      L.ensure(Math.min(h + 28, 80));
+    }
     L.write(qText, L.left, L.y, L.cw, { font: L.f.bold, size: L.S(10.5), lineGap: L.S(2.4) });
     L.y += L.S(3);
     if (type === "identification") {
@@ -419,7 +453,19 @@ function table(L: Layout, t: NonNullable<Block["table"]>) {
     L.hr(y + hh, L.c.primary, L.left, L.right, 1.3);
     L.y = y + hh;
   };
-  L.ensure(60);
+  // Whole-table keep when it fits a page; otherwise bind header + first row.
+  const pageH = L.bottom - L.top;
+  const headerH = t.headers.some(Boolean)
+    ? Math.max(...t.headers.map((hh) => L.measure(pdfText(hh), cw - pad * 2, L.f.bold, size, 1))) + pad * 2
+    : 0;
+  const rowHs = t.rows.map((r) => Math.max(...r.map((c) => L.measure(pdfText(c), cw - pad * 2, L.f.body, size, 1.5))) + pad * 2);
+  const totalH = headerH + rowHs.reduce((a, rh) => a + rh, 0) + L.S(14);
+  if (totalH <= pageH && L.remaining() < totalH && L.y > L.top + 1) {
+    L.doc.addPage();
+    L.y = L.top;
+  } else {
+    L.ensure(60 + (rowHs[0] ?? 0));
+  }
   drawHeader();
   t.rows.forEach((r) => {
     const rh = Math.max(...r.map((c) => L.measure(pdfText(c), cw - pad * 2, L.f.body, size, 1.5))) + pad * 2;
@@ -567,8 +613,129 @@ function contentsPage(L: Layout, titles: string[]): TocEntry[] {
   return entries;
 }
 
+/**
+ * Estimated total height of a block (mirrors renderBlock's components).
+ * Conservative approximations are fine: over-estimating only moves a block
+ * to the next page earlier, never overlaps content.
+ */
+function measureBlockHeight(L: Layout, b: Block): number {
+  const title = pdfText(b.title);
+  let h: number;
+  if (L.compact) h = L.measure(title.toUpperCase(), L.cw, L.f.bold, L.S(9.5), 0) + L.S(18);
+  else h = L.measure(title, L.cw, L.f.heading, L.S(18), 1) + L.S(28);
+  if (b.subtitle) h += L.measure(pdfText(b.subtitle), L.cw, L.f.italic, L.S(10.5), 2) + L.S(8);
+  if (b.body) {
+    const fs = L.S(L.compact ? 10 : 10.5);
+    for (const p of b.body
+      .split(/\n{2,}/)
+      .map((s) => s.replace(/\n/g, " ").trim())
+      .filter(Boolean)) {
+      h += L.measure(pdfText(p), L.cw, L.f.body, fs, L.S(L.compact ? 2.4 : 3.2)) + L.S(L.compact ? 5 : 8);
+    }
+  }
+  const gapB = L.S(L.compact ? 2.5 : 4.5);
+  const bulletsH = (items: string[], width = L.cw, fs = L.S(L.compact ? 10 : 10.5)) =>
+    items.reduce((a, it) => a + L.measure(pdfText(it), width - 16, L.f.body, fs, L.S(2.4)) + 4 + gapB, 0) + L.S(4);
+  switch (b.layout) {
+    case "bullets":
+    case "agenda":
+      h += bulletsH(b.bullets);
+      break;
+    case "two-column":
+    case "comparison": {
+      const cols = (b.columns ?? []).slice(0, 3);
+      const n = Math.max(1, cols.length);
+      const gap = 12;
+      const cw = (L.cw - gap * (n - 1)) / n;
+      const pad = L.S(12);
+      let tallest = 0;
+      for (const c of cols) {
+        let ch = pad;
+        if (c.heading) ch += L.measure(pdfText(c.heading), cw - pad * 2, L.f.bold, L.S(11), 1) + 8;
+        if (c.body) ch += L.measure(pdfText(c.body), cw - pad * 2, L.f.body, L.S(9.8), 2.4) + 8;
+        for (const bb of c.bullets) ch += L.measure(pdfText(bb), cw - pad * 2 - 14, L.f.body, L.S(9.8), 2.2) + 4.5;
+        tallest = Math.max(tallest, ch + pad);
+      }
+      h += tallest + L.S(14);
+      break;
+    }
+    case "groups":
+      for (const g of b.groups ?? []) {
+        h += L.measure(pdfText(g.heading), L.cw, L.f.bold, L.S(10.5), 1) + L.S(2.5);
+        if (g.body) h += L.measure(pdfText(g.body.replace(/\n+/g, " ")), L.cw, L.f.body, L.S(9.6), 2) + L.S(3);
+        h += bulletsH(g.bullets) + L.S(L.compact ? 2 : 4);
+      }
+      h += bulletsH(b.bullets);
+      break;
+    case "stats": {
+      const stats = (b.stats ?? []).slice(0, 4);
+      const gap = 10;
+      const cw = (L.cw - gap * (Math.max(1, stats.length) - 1)) / Math.max(1, stats.length);
+      const pad = L.S(14);
+      let tallest = 0;
+      for (const s of stats) {
+        const vh = L.measure(pdfText(s.value), cw - pad * 2, L.f.heading, L.S(s.value.length > 9 ? 17 : 22), 0);
+        const lh = L.measure(pdfText(s.label), cw - pad * 2, L.f.bold, L.S(9.5), 1);
+        const dh = s.description ? L.measure(pdfText(s.description), cw - pad * 2, L.f.body, L.S(8.5), 1) + 4 : 0;
+        tallest = Math.max(tallest, vh + lh + dh + pad * 2 + 6);
+      }
+      h += tallest + 12 + L.S(14) + bulletsH(b.bullets);
+      break;
+    }
+    case "quote": {
+      const q = b.quote;
+      if (q) {
+        const pad = L.S(20);
+        h += L.measure(pdfText(`\u201C${q.text}\u201D`), L.cw - pad * 2 - 6, L.f.italic, L.S(12.5), 3.5) + (q.attribution ? L.S(16) : 0) + pad * 2 + 10 + L.S(14);
+      }
+      h += bulletsH(b.bullets);
+      break;
+    }
+    case "timeline":
+      for (const s of b.steps ?? []) {
+        const lh = L.measure(pdfText(s.label), L.cw - 34, L.f.bold, L.S(10.5), 1);
+        const dh = s.description ? L.measure(pdfText(s.description), L.cw - 34, L.f.body, L.S(9.5), 2) : 0;
+        h += Math.max(L.S(24), lh + dh + L.S(6)) + L.S(6);
+      }
+      h += L.S(6) + bulletsH(b.bullets);
+      break;
+    case "table": {
+      const t = b.table;
+      if (t) {
+        const cols = Math.max(t.headers.length, ...t.rows.map((r) => r.length), 1);
+        const cw = L.cw / cols;
+        const pad = L.S(7);
+        const size = L.S(cols > 4 ? 8.5 : 9.5);
+        if (t.headers.some(Boolean)) h += Math.max(...t.headers.map((hh) => L.measure(pdfText(hh), cw - pad * 2, L.f.bold, size, 1))) + pad * 2;
+        for (const r of t.rows) h += Math.max(...r.map((c) => L.measure(pdfText(c), cw - pad * 2, L.f.body, size, 1.5))) + pad * 2;
+        h += L.S(14);
+      }
+      h += bulletsH(b.bullets);
+      break;
+    }
+    case "quiz": {
+      (b.quiz ?? []).forEach((q) => {
+        h += L.measure(pdfText(q.question), L.cw, L.f.bold, L.S(10.5), 2.4) + L.S(14);
+        for (const o of q.options.length ? q.options : ["True", "False"]) {
+          h += L.measure(pdfText(o), L.cw - L.S(24), L.f.body, L.S(10), 2) + L.S(2);
+        }
+      });
+      h += L.S(6) + bulletsH(b.bullets);
+      break;
+    }
+    default:
+      h += bulletsH(b.bullets);
+      for (const q of b.quiz ?? []) h += L.measure(pdfText(q.question), L.cw, L.f.bold, L.S(10.5), 2.4) + L.S(10);
+  }
+  if (b.callout) {
+    h += L.measure(pdfText(b.callout), L.cw - L.S(36) - 6, L.f.bold, L.S(11), 3) + L.S(L.compact ? 30 : 46) + 10 + L.S(14);
+  }
+  return h;
+}
+
 function renderBlock(L: Layout, b: Block) {
-  heading(L, pdfText(b.title));
+  // Bind heading to following content: reserve room so it never strands alone at a page bottom.
+  heading(L, pdfText(b.title), 18, L.S(L.compact ? 56 : 80));
   if (b.subtitle) {
     L.write(pdfText(b.subtitle), L.left, L.y, L.cw, { font: L.f.italic, size: L.S(10.5), color: L.c.muted, lineGap: 2 });
     L.y += L.S(8);
@@ -733,9 +900,24 @@ export async function renderPdfMeasured(spec: DocumentSpec): Promise<{ buffer: B
     if (wantsBreak) {
       doc.addPage();
       L.y = L.top;
-    } else if (L.remaining() < L.S(compact ? 70 : 110)) {
-      doc.addPage();
-      L.y = L.top;
+    } else {
+      // Keep-together: a block that fits on one page moves as a whole instead of
+      // splitting mid-list. Tall blocks avoid starting in a bottom sliver (orphan factory).
+      const h = measureBlockHeight(L, b);
+      const pageH = L.bottom - L.top;
+      const floor = L.S(compact ? 70 : 110);
+      if (h <= pageH - L.S(20)) {
+        if (L.remaining() < Math.max(h, floor)) {
+          doc.addPage();
+          L.y = L.top;
+        }
+      } else if (L.remaining() < floor) {
+        doc.addPage();
+        L.y = L.top;
+      } else if (L.remaining() < Math.min(pageH * 0.35, 200) && L.y > L.top + 1) {
+        doc.addPage();
+        L.y = L.top;
+      }
     }
     startPages.push(L.pageIndex() + 1);
     // Pass bullet style from resolver/theme

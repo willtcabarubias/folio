@@ -1,6 +1,6 @@
 "use client";
 
-import { BarChart3, Clock3, Columns2, Layers, Quote, Table2, Type, Loader2, ClipboardCheck } from "lucide-react";
+import { BarChart3, ChevronDown, ChevronUp, ClipboardCheck, Clock3, Columns2, Copy, Layers, Loader2, Plus, Quote, Table2, Trash2, Type, X } from "lucide-react";
 import type { Block, DocumentSpec, Layout } from "@/lib/spec/types";
 
 type Props = {
@@ -9,6 +9,22 @@ type Props = {
   busy?: boolean;
   streaming?: boolean;
 };
+
+/** Layouts safe to switch between in the preview (structural cover/agenda/section/closing stay outline-owned). */
+const SWITCHABLE_LAYOUTS: Layout[] = [
+  "paragraph",
+  "bullets",
+  "groups",
+  "timeline",
+  "stats",
+  "table",
+  "comparison",
+  "two-column",
+  "quote",
+  "quiz",
+];
+
+const isStructural = (l: Layout) => l === "cover" || l === "agenda" || l === "section" || l === "closing";
 
 const LAYOUT_LABEL: Record<Layout, string> = {
   cover: "Cover",
@@ -54,6 +70,37 @@ export function EditablePreview({ spec, onChange, busy, streaming }: Props) {
     next[idx] = { ...next[idx], ...patch };
     onChange({ ...spec, blocks: next });
   };
+  const moveBlock = (idx: number, dir: -1 | 1) => {
+    const j = idx + dir;
+    if (j < 0 || j >= spec.blocks.length) return;
+    const next = spec.blocks.slice();
+    [next[idx], next[j]] = [next[j], next[idx]];
+    onChange({ ...spec, blocks: next });
+  };
+  const removeBlock = (idx: number) => {
+    if (spec.blocks.length <= 1) return;
+    onChange({ ...spec, blocks: spec.blocks.filter((_, i) => i !== idx) });
+  };
+  const duplicateBlock = (idx: number) => {
+    const src = spec.blocks[idx];
+    const ids = new Set(spec.blocks.map((b) => b.id));
+    let n = 0;
+    let id = `${src.id}_copy`;
+    while (ids.has(id)) id = `${src.id}_copy${++n}`;
+    const next = spec.blocks.slice();
+    next.splice(idx + 1, 0, { ...src, id, title: `${src.title} (copy)` });
+    onChange({ ...spec, blocks: next });
+  };
+  const removeBullet = (idx: number, bi: number) => {
+    const b = spec.blocks[idx];
+    updateBlock(idx, { bullets: b.bullets.filter((_, k) => k !== bi) });
+  };
+  const addBullet = (idx: number, text: string) => {
+    const v = text.trim();
+    if (!v) return;
+    const b = spec.blocks[idx];
+    updateBlock(idx, { bullets: [...b.bullets, v] });
+  };
 
   return (
     <div className="scroll-thin h-full overflow-y-auto bg-[linear-gradient(180deg,#F2F5FC_0%,#EFF3FB_100%)] px-3 py-5 md:px-6">
@@ -65,18 +112,48 @@ export function EditablePreview({ spec, onChange, busy, streaming }: Props) {
             key={block.id}
             className={`group relative flex flex-col rounded-2xl bg-white shadow-[0_8px_30px_-18px_rgba(20,40,90,0.25)] ring-1 ring-line ${busy && !streaming ? "opacity-60" : ""} ${streaming ? "animate-rise" : ""}`}
           >
-            {/* block header — read-only, no drag, no layout switch, no move/duplicate/delete */}
+            {/* block header — layout switch + move/duplicate/delete (structural cover/closing stay outline-owned) */}
             <div className="flex items-center gap-2 border-b border-line/60 px-3 py-2">
               <span className="flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-[11px] font-semibold text-ink">
                 <span className="opacity-60">{LAYOUT_ICON[block.layout]}</span>
-                {LAYOUT_LABEL[block.layout]}
+                {isStructural(block.layout) || busy ? (
+                  LAYOUT_LABEL[block.layout]
+                ) : (
+                  <select
+                    value={block.layout}
+                    onChange={(e) => updateBlock(idx, { layout: e.target.value as Layout })}
+                    disabled={busy}
+                    className="cursor-pointer bg-transparent outline-none"
+                    aria-label="Block layout"
+                  >
+                    {SWITCHABLE_LAYOUTS.map((l) => (
+                      <option key={l} value={l}>
+                        {LAYOUT_LABEL[l]}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </span>
               <span className="text-xs font-semibold text-muted">{String(idx + 1).padStart(2, "0")}</span>
               {isLastStreaming && (
-                <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-brand-soft px-2 py-0.5 text-[10px] font-medium text-ink">
+                <span className="inline-flex items-center gap-1 rounded-full bg-brand-soft px-2 py-0.5 text-[10px] font-medium text-ink">
                   <Loader2 size={10} className="animate-spin" /> Writing…
                 </span>
               )}
+              <span className="ml-auto flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+                <button type="button" onClick={() => moveBlock(idx, -1)} disabled={busy || idx === 0} className="rounded-lg p-1 text-muted hover:bg-slate-100 hover:text-ink disabled:opacity-20" aria-label="Move block up">
+                  <ChevronUp size={13} />
+                </button>
+                <button type="button" onClick={() => moveBlock(idx, 1)} disabled={busy || idx === spec.blocks.length - 1} className="rounded-lg p-1 text-muted hover:bg-slate-100 hover:text-ink disabled:opacity-20" aria-label="Move block down">
+                  <ChevronDown size={13} />
+                </button>
+                <button type="button" onClick={() => duplicateBlock(idx)} disabled={busy} className="rounded-lg p-1 text-muted hover:bg-slate-100 hover:text-ink disabled:opacity-20" aria-label="Duplicate block">
+                  <Copy size={13} />
+                </button>
+                <button type="button" onClick={() => removeBlock(idx)} disabled={busy || spec.blocks.length <= 1} className="rounded-lg p-1 text-muted hover:bg-red-50 hover:text-danger disabled:opacity-20" aria-label="Delete block">
+                  <Trash2 size={13} />
+                </button>
+              </span>
             </div>
 
             <div className="space-y-3 p-4">
@@ -114,13 +191,13 @@ export function EditablePreview({ spec, onChange, busy, streaming }: Props) {
                 </div>
               )}
 
-              {/* bullets — only if already has bullets, edit existing only, no add/remove */}
-              {block.bullets.length > 0 && (
+              {/* bullets — edit, add (Enter), remove */}
+              {(block.bullets.length > 0 || !busy) && (
                 <div className="space-y-1.5">
                   <label className="text-[11px] font-medium text-muted">Bullets · {block.bullets.length}</label>
                   <ul className="space-y-1">
                     {block.bullets.map((it, i) => (
-                      <li key={i} className="flex items-start gap-2 rounded-lg bg-slate-50 px-2 py-1 ring-1 ring-line">
+                      <li key={i} className="group/bullet flex items-start gap-2 rounded-lg bg-slate-50 px-2 py-1 ring-1 ring-line">
                         <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-ink/60" />
                         <input
                           value={it}
@@ -128,8 +205,40 @@ export function EditablePreview({ spec, onChange, busy, streaming }: Props) {
                           disabled={busy}
                           className="flex-1 border-0 bg-transparent p-0 text-[13px] text-ink outline-none"
                         />
+                        <button
+                          type="button"
+                          onClick={() => removeBullet(idx, i)}
+                          disabled={busy}
+                          className="mt-0.5 rounded-full p-1 text-muted/60 opacity-0 transition hover:bg-slate-200 hover:text-ink group-hover/bullet:opacity-100 disabled:opacity-20"
+                          aria-label="Remove bullet"
+                        >
+                          <X size={12} />
+                        </button>
                       </li>
                     ))}
+                    {!busy && (
+                      <li className="flex items-center gap-2 rounded-lg border border-dashed border-line px-2 py-1">
+                        <Plus size={12} className="shrink-0 text-muted/60" />
+                        <input
+                          placeholder="Add a bullet — Enter to add"
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              const el = e.target as HTMLInputElement;
+                              addBullet(idx, el.value);
+                              el.value = "";
+                            }
+                          }}
+                          onBlur={(e) => {
+                            if (e.target.value.trim()) {
+                              addBullet(idx, e.target.value);
+                              e.target.value = "";
+                            }
+                          }}
+                          className="flex-1 border-0 bg-transparent p-0 text-[13px] text-ink outline-none placeholder:text-muted/50"
+                        />
+                      </li>
+                    )}
                   </ul>
                 </div>
               )}
@@ -478,19 +587,7 @@ export function EditablePreview({ spec, onChange, busy, streaming }: Props) {
                 </div>
               )}
 
-              {/* notes — only if exists and pptx */}
-              {spec.format === "pptx" && block.notes !== undefined && (
-                <div>
-                  <label className="mb-1 block text-[11px] font-medium text-muted">Speaker notes</label>
-                  <textarea
-                    value={block.notes}
-                    onChange={(e) => updateBlock(idx, { notes: e.target.value })}
-                    disabled={busy}
-                    rows={2}
-                    className="field min-h-[44px] py-2 text-[13px]"
-                  />
-                </div>
-              )}
+              {/* speaker notes removed: decks export without a notes pane */}
             </div>
           </div>
           );

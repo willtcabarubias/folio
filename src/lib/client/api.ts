@@ -258,7 +258,6 @@ export function specToMarkdown(spec: DocumentSpec): string {
       out.push(`| ${headers.join(" | ")} |`, `| ${headers.map(() => "---").join(" | ")} |`, ...b.table.rows.map((r) => `| ${r.join(" | ")} |`), "");
     }
     if (b.callout) out.push(`> **${b.callout}**`, "");
-    if (b.notes) out.push(`<!-- notes: ${b.notes} -->`, "");
   }
   return out.join("\n");
 }

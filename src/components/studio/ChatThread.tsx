@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, Check, ChevronDown, ChevronRight, FileText, Sparkles, Bot } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, ChevronLeft, ChevronRight, FileText, Minus, Plus, Sparkles, Bot } from "lucide-react";
 import type { Question } from "@/lib/spec/types";
+import { sanitizeChatMessage } from "@/lib/spec/normalize";
 import type { StoredMessage } from "@/lib/store/projects";
 import { ThinkingState, StreamingText } from "@/components/ui/ai-agent-response";
 import type { TraceNode } from "@/components/ui/ai-agent-response";
@@ -149,6 +150,9 @@ function AssistantMessage({
   onRetry?: () => void;
 }) {
   const r = message.response;
+  // Render-time net: messages stored before server-side sanitization may still
+  // contain tofu/emoji bytes. sanitizeChatMessage is idempotent and cheap.
+  const cleanText = sanitizeChatMessage(message.text);
   return (
     <div className="flex w-full items-start justify-start gap-3 text-left">
       <Avatar />
@@ -167,15 +171,15 @@ function AssistantMessage({
           </div>
         ) : isLatest ? (
           <StreamingText
-            text={message.text}
+            text={cleanText}
             speed={18}
             chunkSize={2}
             className={`text-left ${compact ? "text-[11px] leading-4" : "text-[15px] leading-6"}`}
           />
         ) : (
-          <p className={`whitespace-pre-wrap text-left text-ink select-text text-pretty ${compact ? "text-[11px] leading-4" : "text-[15px] leading-6"}`}>{message.text}</p>
+          <p className={`whitespace-pre-wrap text-left text-ink select-text text-pretty ${compact ? "text-[11px] leading-4" : "text-[15px] leading-6"}`}>{cleanText}</p>
         )}
-        {r?.kind === "clarify" && (message.answered ? <AnsweredSummary questions={r.questions} answers={message.answers} /> : <ClarifyCard questions={r.questions} compact={compact} onSubmit={(a) => onAnswer(message, a)} onSkip={() => onSkip(message)} />)}
+        {r?.kind === "clarify" && (message.answered ? <AnsweredSummary questions={r.questions} answers={message.answers} /> : <ClarifyCard questions={r.questions} compact={compact} onSubmit={(a) => onAnswer(message, a)} />)}
       </div>
     </div>
   );
@@ -223,7 +227,7 @@ function AnsweredSummary({ questions, answers }: { questions: Question[]; answer
   );
 }
 
-function ClarifyCard({ questions, compact, onSubmit, onSkip }: { questions: Question[]; compact?: boolean; onSubmit: (answers: { question: string; answer: string }[]) => void; onSkip: () => void }) {
+function ClarifyCard({ questions, compact, onSubmit }: { questions: Question[]; compact?: boolean; onSubmit: (answers: { question: string; answer: string }[]) => void }) {
   const total = questions.length;
   const [idx, setIdx] = useState(0);
   const [selected, setSelected] = useState<Record<string, string[]>>(() => {
@@ -232,17 +236,69 @@ function ClarifyCard({ questions, compact, onSubmit, onSkip }: { questions: Ques
     return init;
   });
   const [custom, setCustom] = useState<Record<string, string>>({});
+  // Raw keystrokes for the stepper field (free text allowed — "12", "two pages", ...).
+  const [numDraft, setNumDraft] = useState<Record<string, string | undefined>>({});
 
   const q = questions[idx];
-  const ui: NonNullable<Question["ui"]> = q.ui ?? (q.options.length === 0 ? "text" : q.allowMultiple ? "checkbox" : "hybrid");
+  const rawUi: NonNullable<Question["ui"]> = q.ui ?? (q.options.length === 0 ? "text" : q.allowMultiple ? "checkbox" : "hybrid");
+  // Mirror of the server coercion: only the format question may be pure radio.
+  // Stale cached payloads with radio focus questions render hybrid instead.
+  const ui = rawUi === "radio" && q.id !== "format" ? "hybrid" : rawUi;
+  const isMulti = ui === "checkbox" || q.allowMultiple;
   const showOptions = ui !== "text";
   const showOtherField = ui === "hybrid" || ui === "text";
   const otherPlaceholder = q.placeholder || (ui === "text" ? "Type your answer" : "Type your own");
+  // Numeric hybrid (length tiers like "Standard (10-12 slides)") gets a stepper
+  // bound to the custom value instead of a bare text field.
+  const isNumericHybrid = ui === "hybrid" && q.options.length > 0 && q.options.every((o) => /\d/.test(o));
+  const stepperUnit = useMemo(() => {
+    if (!isNumericHybrid) return "";
+    const text = `${q.question} ${q.options.join(" ")}`.toLowerCase();
+    if (/slide/.test(text)) return "slides";
+    if (/page/.test(text)) return "pages";
+    return "";
+  }, [isNumericHybrid, q.question, q.options]);
+  const stepperMax = q.id === "length" ? 30 : 99;
 
   const hasCurrent = useMemo(() => {
     if (ui === "text") return Boolean(custom[q.id]?.trim());
     return (selected[q.id]?.length ?? 0) > 0 || Boolean(custom[q.id]?.trim());
   }, [ui, q.id, selected, custom]);
+
+  const stepperValue = useMemo(() => {
+    if (!isNumericHybrid) return 0;
+    const sources = [custom[q.id] ?? "", ...(selected[q.id] ?? []), q.recommended ?? "", q.options[0] ?? ""];
+    for (const s of sources) {
+      const m = s.match(/\d+/);
+      if (m) return Math.max(1, Math.min(stepperMax, parseInt(m[0], 10)));
+    }
+    return 1;
+  }, [isNumericHybrid, custom, selected, q.id, q.recommended, q.options, stepperMax]);
+
+  const setStepper = (n: number) => {
+    const v = Math.max(1, Math.min(stepperMax, n));
+    const text = stepperUnit ? `${v} ${stepperUnit}` : `${v}`;
+    setCustom((p) => ({ ...p, [q.id]: text }));
+    setNumDraft((p) => ({ ...p, [q.id]: undefined }));
+    // Single-source: a custom value replaces any picked preset.
+    setSelected((p) => ({ ...p, [q.id]: [] }));
+  };
+
+  // Bare numbers on numeric hybrids get the hidden unit appended at submit
+  // ("12" → "12 slides"); real text ("two pages") passes through untouched.
+  const numericUnitFor = (qq: Question): string => {
+    if (qq.options.length === 0 || !qq.options.every((o) => /\d/.test(o))) return "";
+    const text = `${qq.question} ${qq.options.join(" ")}`.toLowerCase();
+    if (/slide/.test(text)) return "slides";
+    if (/page/.test(text)) return "pages";
+    return "";
+  };
+  const withUnit = (qq: Question, raw: string): string => {
+    const t = raw.trim();
+    if (!/^\d+$/.test(t)) return t;
+    const u = numericUnitFor(qq);
+    return u ? `${t} ${u}` : t;
+  };
 
   const buildAnswers = (override?: { id: string; selected: string[]; custom: string }) => {
     return questions.map((qq) => {
@@ -252,10 +308,12 @@ function ClarifyCard({ questions, compact, onSubmit, onSkip }: { questions: Ques
         sel = override.selected;
         c = override.custom.trim();
       }
-      const parts = [...sel];
-      if (c) parts.push(c);
+      const multi = qq.allowMultiple;
+      const answer = multi
+        ? [...sel.map((s) => withUnit(qq, s)), ...(c ? [withUnit(qq, c)] : [])].join(", ")
+        : withUnit(qq, c || sel[0] || "");
       const fallback = qq.recommended || qq.options[0] || "No preference";
-      return { question: qq.question, answer: parts.join(", ") || fallback };
+      return { question: qq.question, answer: answer || fallback };
     });
   };
 
@@ -283,9 +341,17 @@ function ClarifyCard({ questions, compact, onSubmit, onSkip }: { questions: Ques
   const toggle = (opt: string) => {
     const cur = selected[q.id] ?? [];
     let next: string[];
-    if (q.allowMultiple || ui === "checkbox") next = cur.includes(opt) ? cur.filter((o) => o !== opt) : [...cur, opt];
+    if (isMulti) next = cur.includes(opt) ? cur.filter((o) => o !== opt) : [...cur, opt];
     else next = [opt];
     setSelected((p) => ({ ...p, [q.id]: next }));
+    // Single-source: picking a preset clears any typed custom value (and vice versa).
+    if (!isMulti) setCustom((p) => ({ ...p, [q.id]: "" }));
+  };
+
+  const onCustomType = (value: string) => {
+    setCustom((p) => ({ ...p, [q.id]: value }));
+    // Single-source: typing clears picked presets so answers never merge ("1 page, 12").
+    if (!isMulti && value.trim()) setSelected((p) => ({ ...p, [q.id]: [] }));
   };
 
   const progress = ((idx + 1) / total) * 100;
@@ -346,31 +412,97 @@ function ClarifyCard({ questions, compact, onSubmit, onSkip }: { questions: Ques
         </div>
       )}
 
-      {/* Other field — always visible for hybrid/text */}
-      {showOtherField && (
-        <label className="block space-y-1.5">
-          <span className="text-[11px] font-medium text-muted">{ui === "text" ? "Your answer" : "Other — type your own"}</span>
+      {/* Type-your-own — always visible for hybrid/text; focused/typed state reads as selected */}
+      {showOtherField && !isNumericHybrid && (
+        <div>
           <input
             value={custom[q.id] ?? ""}
-            onChange={(e) => setCustom((p) => ({ ...p, [q.id]: e.target.value }))}
+            onFocus={() => {
+              // Focusing the field selects it: picked presets yield immediately.
+              if (!isMulti) setSelected((p) => ({ ...p, [q.id]: [] }));
+            }}
+            onChange={(e) => onCustomType(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && hasCurrent) {
                 e.preventDefault();
                 goNext();
               }
             }}
-            placeholder={otherPlaceholder}
-            className="field"
+            placeholder={ui === "text" ? otherPlaceholder : "Type your own"}
+            aria-label={ui === "text" ? "Your answer" : "Type your own"}
+            className={`field min-h-[48px] rounded-xl text-[13.5px] transition focus:border-ink focus:ring-2 focus:ring-ink/70 ${
+              custom[q.id]?.trim() ? "border-ink bg-white ring-2 ring-ink/70" : ""
+            }`}
             autoFocus={ui === "text"}
           />
-        </label>
+        </div>
+      )}
+      {showOtherField && isNumericHybrid && (
+        <div className="space-y-1.5">
+          <span className="text-[11px] font-medium text-muted">Custom — type anything, or pick above</span>
+          <div
+            className={`flex min-h-[48px] w-full items-center gap-2 rounded-xl bg-slate-50 px-2 py-2 ring-1 ring-line transition focus-within:border-ink focus-within:ring-2 focus-within:ring-ink/70 ${
+              custom[q.id]?.trim() ? "border-ink bg-white ring-2 ring-ink/70" : ""
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => setStepper(stepperValue - 1)}
+              disabled={stepperValue <= 1}
+              aria-label="Decrease number"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white text-ink shadow-sm ring-1 ring-line transition hover:bg-ink hover:text-white active:scale-95 disabled:opacity-30 disabled:hover:bg-white disabled:hover:text-ink"
+            >
+              <Minus size={15} strokeWidth={2.5} />
+            </button>
+            <input
+              value={numDraft[q.id] ?? stepperValue}
+              onFocus={() => {
+                if (!isMulti) setSelected((p) => ({ ...p, [q.id]: [] }));
+              }}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setNumDraft((p) => ({ ...p, [q.id]: raw }));
+                // Free text flows straight to the answer; presets yield.
+                onCustomType(raw);
+              }}
+              onBlur={() => {
+                // Numeric drafts snap back to the stepper; real text stays as typed.
+                const d = numDraft[q.id];
+                if (d !== undefined && /\d/.test(d)) setNumDraft((p) => ({ ...p, [q.id]: undefined }));
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && hasCurrent) {
+                  e.preventDefault();
+                  goNext();
+                }
+              }}
+              placeholder={otherPlaceholder}
+              aria-label="Custom value — type any number or text"
+              className="h-9 min-w-0 flex-1 border-0 bg-transparent p-0 text-center text-[16px] font-semibold tabular-nums text-ink outline-none placeholder:text-[13px] placeholder:font-normal placeholder:text-muted/60"
+            />
+            <button
+              type="button"
+              onClick={() => setStepper(stepperValue + 1)}
+              disabled={stepperValue >= stepperMax}
+              aria-label="Increase number"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-white shadow-sm transition hover:opacity-90 active:scale-95 disabled:opacity-30"
+            >
+              <Plus size={15} strokeWidth={2.5} />
+            </button>
+          </div>
+        </div>
       )}
 
       {/* footer */}
       <div className="flex items-center justify-between gap-2 pt-2">
-        <div>
+        <div className="flex items-center gap-1">
           {idx > 0 && (
-            <button type="button" onClick={() => setIdx((i) => i - 1)} className="btn-ghost px-3 text-xs">
+            <button
+              type="button"
+              onClick={() => setIdx((i) => i - 1)}
+              className="inline-flex h-9 items-center gap-1 rounded-full px-3 text-[13px] font-semibold text-muted ring-1 ring-line transition hover:bg-slate-100 hover:text-ink active:scale-95"
+            >
+              <ChevronLeft size={14} strokeWidth={2.5} />
               Back
             </button>
           )}

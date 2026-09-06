@@ -57,12 +57,13 @@ function run(ctx: Ctx, text: string, o: { bold?: boolean; italic?: boolean; colo
   });
 }
 
-function para(ctx: Ctx, children: TextRun[], o: { align?: (typeof AlignmentType)[keyof typeof AlignmentType]; before?: number; after?: number; line?: number; keepNext?: boolean } = {}) {
+function para(ctx: Ctx, children: TextRun[], o: { align?: (typeof AlignmentType)[keyof typeof AlignmentType]; before?: number; after?: number; line?: number; keepNext?: boolean; keepLines?: boolean } = {}) {
   return new Paragraph({
     children,
     alignment: o.align,
     spacing: { before: Math.round((o.before ?? 0) * ctx.k), after: Math.round((o.after ?? 160) * ctx.k), line: Math.round((o.line ?? (ctx.compact ? 276 : 300)) * ctx.k) },
     keepNext: o.keepNext,
+    keepLines: o.keepLines,
   });
 }
 
@@ -71,16 +72,21 @@ function bodyParagraphs(ctx: Ctx, body: string, color?: string): Paragraph[] {
     .split(/\n{2,}/)
     .map((s) => s.replace(/\n/g, " ").trim())
     .filter(Boolean)
-    .map((text) => para(ctx, [run(ctx, text, { color })], { after: ctx.compact ? 120 : 180, line: ctx.compact ? 276 : 320 }));
+    .map((text) => para(ctx, [run(ctx, text, { color })], { after: ctx.compact ? 120 : 180, line: ctx.compact ? 276 : 320, keepLines: true }));
 }
 
 function bulletParas(ctx: Ctx, items: string[], size?: number): Paragraph[] {
+  // Short lists (<=5) travel together via keepNext chain; longer lists keep
+  // per-bullet lines intact and let Word break between bullets.
+  const chain = items.length <= 5;
   return items.map(
-    (text) =>
+    (text, i) =>
       new Paragraph({
         children: [run(ctx, text, { size })],
         numbering: { reference: "bullets", level: 0 },
         spacing: { after: Math.round((ctx.compact ? 60 : 100) * ctx.k), line: Math.round((ctx.compact ? 264 : 300) * ctx.k) },
+        keepLines: true,
+        keepNext: chain && i < items.length - 1 ? true : undefined,
       }),
   );
 }
@@ -123,8 +129,8 @@ function gapCell(width: number) {
   return new TableCell({ children: [new Paragraph("")], width: { size: width, type: WidthType.DXA }, borders: noBorders });
 }
 
-function rowTable(cells: TableCell[], widths: number[], width: number) {
-  return new Table({ rows: [new TableRow({ children: cells })], width: { size: width, type: WidthType.DXA }, columnWidths: widths, borders: noBorders });
+function rowTable(cells: TableCell[], widths: number[], width: number, o: { cantSplit?: boolean } = {}) {
+  return new Table({ rows: [new TableRow({ children: cells, cantSplit: o.cantSplit })], width: { size: width, type: WidthType.DXA }, columnWidths: widths, borders: noBorders });
 }
 
 function callout(ctx: Ctx, text: string, label = "Key takeaway"): Table {
@@ -138,6 +144,7 @@ function callout(ctx: Ctx, text: string, label = "Key takeaway"): Table {
     borders: noBorders,
     rows: [
       new TableRow({
+        cantSplit: true,
         children: [
           new TableCell({
             width: { size: w, type: WidthType.DXA },
@@ -160,12 +167,14 @@ function quizParas(ctx: Ctx, qs: NonNullable<Block["quiz"]>): Paragraph[] {
   const out: Paragraph[] = [];
   const letters = ["A", "B", "C", "D", "E", "F"];
   qs.forEach((q, idx) => {
+    // Chain each question's paragraphs with keepNext so stem + options + answer
+    // travel together; the chain ends at the trailing spacer (no cross-question lock).
     const num = idx + 1;
-    out.push(para(ctx, [run(ctx, `${num}. ${q.question}`, { bold: true, size: 10.5 })], { after: 60 }));
+    out.push(para(ctx, [run(ctx, `${num}. ${q.question}`, { bold: true, size: 10.5 })], { after: 60, keepLines: true, keepNext: true }));
     const type = q.type ?? (q.options.length <= 2 ? "tf" : "mcq");
     if (type === "identification") {
-      out.push(para(ctx, [run(ctx, "Answer: _________________________", { size: 10, color: ctx.c.muted })], { after: 40 }));
-      if (q.explanation) out.push(para(ctx, [run(ctx, q.explanation, { size: 9.5, color: ctx.c.muted })], { after: 80 }));
+      out.push(para(ctx, [run(ctx, "Answer: _________________________", { size: 10, color: ctx.c.muted })], { after: 40, keepLines: true, keepNext: true }));
+      if (q.explanation) out.push(para(ctx, [run(ctx, q.explanation, { size: 9.5, color: ctx.c.muted })], { after: 80, keepLines: true, keepNext: true }));
     } else {
       const opts = q.options.length ? q.options : ["True", "False"];
       opts.forEach((opt, oi) => {
@@ -175,12 +184,14 @@ function quizParas(ctx: Ctx, qs: NonNullable<Block["quiz"]>): Paragraph[] {
             children: [run(ctx, `${label}. ${opt}`, { size: 10 })],
             spacing: { after: Math.round(60 * ctx.k), line: Math.round(276 * ctx.k) },
             indent: { left: 360, hanging: 260 },
+            keepLines: true,
+            keepNext: true,
           }),
         );
       });
       const ans = q.answer ?? (typeof q.answerIndex === "number" && q.options[q.answerIndex] ? q.options[q.answerIndex] : "");
-      if (ans) out.push(para(ctx, [run(ctx, `Answer: ${ans}`, { size: 9, bold: true, color: ctx.c.primary })], { after: 40 }));
-      if (q.explanation) out.push(para(ctx, [run(ctx, q.explanation, { size: 9.5, color: ctx.c.muted })], { after: 60 }));
+      if (ans) out.push(para(ctx, [run(ctx, `Answer: ${ans}`, { size: 9, bold: true, color: ctx.c.primary })], { after: 40, keepLines: true, keepNext: true }));
+      if (q.explanation) out.push(para(ctx, [run(ctx, q.explanation, { size: 9.5, color: ctx.c.muted })], { after: 60, keepLines: true, keepNext: true }));
     }
     out.push(spacer(ctx, 40));
   });
@@ -425,7 +436,7 @@ function renderBlock(ctx: Ctx, b: Block): (Paragraph | Table)[] {
         );
         if (i < stats.length - 1) cells.push(gapCell(gap));
       });
-      out.push(rowTable(cells, stats.flatMap((_, i) => (i < stats.length - 1 ? [cw, gap] : [cw])), w));
+      out.push(rowTable(cells, stats.flatMap((_, i) => (i < stats.length - 1 ? [cw, gap] : [cw])), w, { cantSplit: true }));
       out.push(spacer(ctx, 120));
       if (b.bullets.length) out.push(...bulletParas(ctx, b.bullets));
       break;
@@ -441,6 +452,7 @@ function renderBlock(ctx: Ctx, b: Block): (Paragraph | Table)[] {
             borders: noBorders,
             rows: [
               new TableRow({
+                cantSplit: true,
                 children: [
                   new TableCell({
                     width: { size: w, type: WidthType.DXA },

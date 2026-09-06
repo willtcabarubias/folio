@@ -104,7 +104,8 @@ export async function renderPptx(spec: DocumentSpec): Promise<Buffer> {
           break;
       }
     }
-    if (s.notes) slide.addNotes(s.notes);
+    // Speaker notes are intentionally excluded from export (clean decks, no notes pane).
+    void s.notes;
   }
 
   const out = await pptx.write({ outputType: "nodebuffer" });

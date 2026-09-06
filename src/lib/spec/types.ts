@@ -146,11 +146,24 @@ const pageSizeEnum = z.preprocess((v) => {
 const intCoerce = z.preprocess((v) => {
   if (typeof v === "number") return Math.round(v);
   if (typeof v === "string") {
-    const n = parseInt(v.replace(/[^0-9]/g, ""), 10);
+    const m = v.match(/\d+/);
+    if (!m) return undefined;
+    const n = parseInt(m[0], 10);
     return Number.isFinite(n) ? n : undefined;
   }
   return undefined;
 }, z.number().int().optional());
+
+const requestedWordsCoerce = z.preprocess((v) => {
+  if (typeof v === "number" && Number.isFinite(v) && v > 0) return Math.round(v);
+  if (typeof v === "string") {
+    const m = v.match(/\d+/);
+    if (!m) return undefined;
+    const n = parseInt(m[0], 10);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }
+  return undefined;
+}, z.number().int().positive().max(20000).optional());
 
 const lengthSourceEnum = z.preprocess((v) => {
   if (typeof v !== "string") return "inferred";
@@ -183,6 +196,7 @@ export const OutlineSchema = z.object({
   pageSize: pageSizeEnum,
   targetLength: intCoerce,
   lengthSource: lengthSourceEnum.default("inferred"),
+  requestedWords: requestedWordsCoerce,
   sections: z.array(OutlineSectionSchema).min(1),
   designNotes: optStr,
 });
@@ -202,6 +216,8 @@ export type Outline = {
   targetLength: number;
   /** Whether the user explicitly asked for this length. */
   lengthSource: LengthSource;
+  /** Exact word count the user asked for (e.g. 500), if any. Drives the writer budget + UI display. */
+  requestedWords?: number;
   /** Industry-standard length for this document type (used by "Auto"). */
   suggestedLength: number;
   sections: OutlineSection[];
@@ -393,6 +409,8 @@ export type DocumentSpec = {
   originFormat?: Format;
   /** Page budget for documents (undefined for decks). */
   targetPages?: number;
+  /** Exact word count the user asked for, carried from the outline for display + budgets. */
+  requestedWords?: number;
   /** ≤ 2 pages: inline header instead of a cover page, tighter rhythm. */
   compact?: boolean;
   /** Layout scale 0.6–1 chosen by the page-fit pass. */

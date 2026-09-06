@@ -51,6 +51,121 @@ export function wordCount(text: string | undefined): number {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Chat hygiene (assistant bubbles must never show tofu boxes)         */
+/* ------------------------------------------------------------------ */
+
+// Symbols with a clear meaning get an ASCII fallback; everything else
+// pictographic is dropped. Curly quotes/dashes are kept (browsers render them).
+const CHAT_SYMBOL_MAP: Record<string, string> = {
+  "\u2192": "->",
+  "\u2190": "<-",
+  "\u2194": "<->",
+  "\u21D2": "=>",
+  "\u2265": ">=",
+  "\u2264": "<=",
+  "\u2260": "!=",
+  "\u2212": "-",
+  "\u2248": "~",
+  "\u00A0": " ",
+  "\u2009": " ",
+  "\u200B": "",
+};
+
+// Emoji / dingbats / variation selectors / tag characters / object
+// replacement char. These render as tofu boxes on systems without
+// color-emoji fonts.
+const CHAT_STRIP_RE =
+  /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{1F1E6}-\u{1F1FF}\u{20E3}\u{E0020}-\u{E007F}\u{FFFD}]/gu;
+// Keycap sequences (9 + VS15/VS16 + enclosing keycap) must go WHOLE —
+// stripping only the combiners leaves stray digits behind ("Got it 28").
+// Covers text-style VS15 (FE0E), repeated selectors, and fullwidth bases.
+const CHAT_KEYCAP_RE = /[#*0-9\uFF10-\uFF19\uFF03\uFF0A][\uFE00-\uFE0F]*\u20E3/gu;
+const CHAT_CONTROL_RE = /[\u0000-\u0008\u000B-\u000C\u000E-\u001F\u007F-\u009F]/g;
+
+/**
+ * Bulletproof assistant chat text: the free-tier model ignores no-emoji
+ * instructions, so enforce it in code. Maps meaningful symbols to ASCII,
+ * drops emoji (including whole keycap sequences), replacement chars,
+ * lone surrogates and control characters.
+ */
+export function sanitizeChatMessage(input: unknown): string {
+  if (input === null || input === undefined) return "";
+  let s = String(input);
+  s = s.replace(/\r\n?/g, "\n");
+  for (const [k, v] of Object.entries(CHAT_SYMBOL_MAP)) s = s.split(k).join(v);
+  s = s.replace(CHAT_KEYCAP_RE, "");
+  s = s.replace(CHAT_STRIP_RE, "");
+  s = s.replace(CHAT_CONTROL_RE, "");
+  // Lone UTF-16 surrogates (invalid halves) - no lookbehind for wide support.
+  s = s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "");
+  s = s.replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "$1");
+  s = s.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  return s;
+}
+
+/**
+ * Deterministic parse of an explicit word/char request from free text.
+ * Does not rely on the LLM: "500 words" -> { words: 500, pages: 2 },
+ * "1000-word essay" -> { words: 1000, pages: 3 }, "3000 chars" -> { words: ~500, pages: 2 }.
+ * Returns null when no explicit request is found. Last match wins (call with joined transcript).
+ */
+export function parseRequestedWords(text: string | undefined | null): { words: number; pages: number } | null {
+  if (!text) return null;
+  const re = /(\d[\d,]*)\s*(words?|w\b|chars?(?:acters?)?|c\b)|(\d[\d,]*)\s*-\s*words?/gi;
+  let last: { words: number; pages: number } | null = null;
+  let m: RegExpExecArray | null;
+  // Also handle "1000-word" / "500 word essay" hyphenated forms
+  const hyphen = /(\d[\d,]*)\s*-\s*words?/gi;
+  const combined = `${text}`;
+  while ((m = re.exec(combined)) !== null) {
+    const numRaw = (m[1] ?? m[3] ?? "").replace(/,/g, "");
+    const unit = (m[2] ?? "words").toLowerCase();
+    const n = parseInt(numRaw, 10);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    if (unit.startsWith("char") || unit === "c") {
+      const words = Math.max(1, Math.round(n / 5.5));
+      last = { words: Math.min(words, 20000), pages: Math.max(1, Math.min(30, Math.ceil(words / 380))) };
+    } else {
+      if (n > 20000) continue; // ignore absurd numbers (likely years like 2026)
+      last = { words: n, pages: Math.max(1, Math.min(30, Math.ceil(n / 380))) };
+    }
+  }
+  while ((m = hyphen.exec(combined)) !== null) {
+    const n = parseInt(m[1].replace(/,/g, ""), 10);
+    if (!Number.isFinite(n) || n <= 0 || n > 20000) continue;
+    last = { words: n, pages: Math.max(1, Math.min(30, Math.ceil(n / 380))) };
+  }
+  return last;
+}
+
+/** Total actual words in a built spec (content sections, excluding cover header chrome). */
+export function specWordCount(spec: DocumentSpec): number {
+  let n = 0;
+  for (const b of spec.blocks) {
+    if (b.layout === "cover") continue;
+    n += wordCount(b.body);
+    for (const x of b.bullets) n += wordCount(x);
+    for (const c of b.columns ?? []) {
+      n += wordCount(c.body);
+      for (const x of c.bullets) n += wordCount(x);
+      n += wordCount(c.heading);
+    }
+    for (const g of b.groups ?? []) {
+      n += wordCount(g.heading) + wordCount(g.meta) + wordCount(g.body);
+      for (const x of g.bullets) n += wordCount(x);
+    }
+    for (const s of b.steps ?? []) n += wordCount(s.label) + wordCount(s.description);
+    for (const r of b.table?.rows ?? []) for (const cell of r) n += wordCount(cell);
+    for (const q of b.quiz ?? []) {
+      n += wordCount(q.question) + wordCount(q.explanation);
+      for (const o of q.options) n += wordCount(o);
+    }
+    n += wordCount(b.callout);
+  }
+  return n;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Length conventions                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -64,14 +179,17 @@ const DOC_CONVENTIONS: { test: RegExp; range: Range }[] = [
   { test: /\b(resume|cv|curriculum vitae)\b/, range: [1, 1] },
   { test: /\b(cover letter|letter|recommendation|reference)\b/, range: [1, 1] },
   {
-    test: /\b(one[- ]?pager|fact ?sheet|flyer|leaflet|cheat ?sheet|memo(randum)?|agenda|checklist|worksheet|quiz|invoice|receipt|recipe|press release|executive summary|abstract|bio(graphy)?|announcement|notice|poster|infographic|certificate|schedule|timetable|itinerary|job description|job posting|faq|email|speech|toast|statement|sheet|form|template|menu|program|scorecard|rubric)\b/,
+    test: /\b(one[- ]?pager|fact ?sheet|flyer|leaflet|cheat ?sheet|memo(randum)?|agenda|checklist|worksheet|quiz|invoice|receipt|recipe|press release|executive summary|abstract|bio(graphy)?|announcement|notice|poster|infographic|certificate|schedule|timetable|itinerary|job description|job posting|faq|email|speech|toast|statement|sheet|form|template|menu|program|scorecard|rubric|handout)\b/,
     range: [1, 1],
   },
   {
-    test: /\b(lesson plan|brief(ing)?|policy (brief|summary)|product sheet|data ?sheet|case study|syllabus|meeting (notes|minutes)|minutes|sop|standard operating procedure|newsletter|script|study notes|notes|summary|overview|profile|pitch|proposal letter)\b/,
+    test: /\b(lesson plan|brief(ing)?|policy (brief|summary)|product sheet|data ?sheet|case study|syllabus|meeting (notes|minutes)|minutes|sop|standard operating procedure|newsletter|script|study notes|notes|summary|overview|profile|pitch|proposal letter|reviewer)\b/,
     range: [1, 2],
   },
   { test: /\b(essay|article|blog|study guide|book report|review|reflection|op-ed|editorial|tutorial|how-to|guide|explainer|lecture notes|worksheet packet|assignment|homework)\b/, range: [2, 4] },
+  // Specific school formats first (generic "report"/"paper" below would overclaim them).
+  { test: /\b(reaction paper)\b/, range: [1, 2] },
+  { test: /\b(lab report|experiment report|investigatory( project)?)\b/, range: [2, 4] },
   { test: /\b(report|proposal|white ?paper|whitepaper|analysis|plan|playbook|grant|literature review|assessment|evaluation|strategy|manual|curriculum|specification|spec|policy|paper|research)\b/, range: [3, 6] },
 ];
 
@@ -115,6 +233,7 @@ type RawOutline = {
   pageSize: Outline["pageSize"];
   targetLength?: number;
   lengthSource?: LengthSource;
+  requestedWords?: number;
   sections: { id?: string; title: string; layout?: Layout; points: string[] }[];
   designNotes?: string;
   suggestedLength?: number;
@@ -185,15 +304,78 @@ export function normalizeOutline(raw: RawOutline): Outline {
   const suggestedLength = isDeck ? sections.length : convention ? convention[0] : DEFAULT_LENGTH[format];
   let targetLength: number;
   let lengthSource: LengthSource = raw.lengthSource === "user" ? "user" : "inferred";
+  const requestedRaw = raw.targetLength && raw.targetLength > 0 ? Math.min(Math.round(raw.targetLength), 30) : undefined;
   if (isDeck) {
-    targetLength = sections.length;
+    if (lengthSource === "user" && requestedRaw) {
+      targetLength = requestedRaw;
+      // Enforce exact slide count: pad or trim sections to match explicit user request
+      if (sections.length < targetLength) {
+        const need = targetLength - sections.length;
+        const hasClosing = sections[sections.length - 1]?.layout === "closing";
+        const insertAt = hasClosing ? sections.length - 1 : sections.length;
+        for (let i = 0; i < need; i++) {
+          const n = sections.length + 1;
+          const fillerId = uniqueId(`s${n}`, seen);
+          sections.splice(insertAt + i, 0, {
+            id: fillerId,
+            title: `Section ${n}`,
+            layout: "bullets",
+            points: [`Key point for ${cleanText(raw.title) || "topic"} — part ${n}`],
+          });
+        }
+      } else if (sections.length > targetLength) {
+        const cover = sections[0]?.layout === "cover" ? [sections[0]] : [];
+        const closing = sections[sections.length - 1]?.layout === "closing" ? [sections[sections.length - 1]] : [];
+        const middle = sections.filter((_, i) => !(cover.length && i === 0) && !(closing.length && i === sections.length - 1));
+        const keepMiddle = Math.max(0, targetLength - cover.length - closing.length);
+        sections = [...cover, ...middle.slice(0, keepMiddle), ...closing];
+        while (sections.length < targetLength) {
+          const fid = uniqueId(`s${sections.length + 1}`, seen);
+          sections.splice(sections.length - (closing.length ? 1 : 0), 0, { id: fid, title: `Section ${sections.length + 1}`, layout: "bullets", points: [] });
+        }
+      }
+    } else {
+      targetLength = sections.length;
+      if (lengthSource === "user" && !requestedRaw) lengthSource = "inferred";
+    }
   } else {
-    const requested = raw.targetLength && raw.targetLength > 0 ? Math.min(Math.round(raw.targetLength), 30) : undefined;
-    if (lengthSource === "user" && requested) targetLength = requested;
-    else if (convention) targetLength = requested ? Math.min(Math.max(requested, convention[0]), convention[1]) : convention[0];
-    else targetLength = requested ?? DEFAULT_LENGTH[format];
-    if (lengthSource === "user" && !requested) lengthSource = "inferred";
+    if (lengthSource === "user" && requestedRaw) {
+      // Respect explicit user length — do not clamp to convention
+      targetLength = requestedRaw;
+    } else {
+      if (lengthSource === "user" && !requestedRaw) lengthSource = "inferred";
+      if (convention) targetLength = requestedRaw ? Math.min(Math.max(requestedRaw, convention[0]), convention[1]) : convention[0];
+      else targetLength = requestedRaw ?? DEFAULT_LENGTH[format];
+    }
+    // Enforce minimum section count for explicit doc lengths — a 1-section
+    // (cover-only) outline can never satisfy a 2+ page request. Pad content
+    // sections so the writer has something to expand (mirrors deck logic).
+    if (lengthSource === "user" && targetLength >= 2) {
+      const desiredMin = targetLength <= 1 ? 3 : targetLength === 2 ? 5 : Math.min(targetLength * 2, 9);
+      if (sections.length < desiredMin) {
+        const hasClosing = sections[sections.length - 1]?.layout === "closing";
+        const insertAt = hasClosing ? sections.length - 1 : sections.length;
+        const topic = cleanText(raw.title) || "topic";
+        let n = 0;
+        while (sections.length < desiredMin) {
+          n++;
+          const fillerId = uniqueId(`s_pad${n}`, seen);
+          sections.splice(insertAt + n - 1, 0, {
+            id: fillerId,
+            title: `Key aspect ${sections.length} of ${topic}`.slice(0, 80),
+            layout: "paragraph",
+            points: [`Explain this aspect of ${topic} in depth`, `Give a concrete business example`, `Why it matters for jobs and careers`],
+          });
+        }
+      }
+    }
   }
+
+  // Strict word target: prefer explicit requestedWords (validated), else raw passthrough.
+  const requestedWords =
+    typeof raw.requestedWords === "number" && Number.isFinite(raw.requestedWords) && raw.requestedWords > 0
+      ? Math.min(Math.round(raw.requestedWords), 20000)
+      : undefined;
 
   // Theme: respect explicit request, otherwise default to resolver-friendly warm via DEFAULT
   const rawTheme = typeof (raw as any).theme === "string" ? String((raw as any).theme).toLowerCase().trim() : "";
@@ -212,6 +394,7 @@ export function normalizeOutline(raw: RawOutline): Outline {
     pageSize: raw.pageSize,
     targetLength,
     lengthSource,
+    requestedWords,
     suggestedLength,
     sections,
     designNotes: raw.designNotes ? cleanText(raw.designNotes) : undefined,
@@ -239,6 +422,18 @@ export type PagePlan = {
   contentSections: number;
 };
 
+/**
+ * Effective word budget for a document (ruling: page-fill wins on conflict).
+ * A beautiful full page holds ~380 words, so the budget is the page capacity
+ * unless the user asked for MORE words than that — never less.
+ * Single source of truth for writer budgets, top-up thresholds and the UI counter.
+ */
+export function effectiveWordTarget(pages: number, requestedWords?: number): number {
+  const capacity = Math.max(1, Math.round(pages)) * 380;
+  const asked = typeof requestedWords === "number" && requestedWords > 0 ? Math.min(20000, Math.round(requestedWords)) : 0;
+  return Math.max(120, capacity, asked);
+}
+
 export function pagePlan(outline: Outline): PagePlan {
   const pages = Math.max(1, outline.targetLength);
   const isDeck = outline.format === "pptx";
@@ -249,8 +444,7 @@ export function pagePlan(outline: Outline): PagePlan {
   const coverPage = false;
   const tocPage = false;
   const contentPages = Math.max(1, pages);
-  const wordsPerPage = 380;
-  const wordsTotal = Math.max(120, Math.round(contentPages * wordsPerPage));
+  const wordsTotal = effectiveWordTarget(contentPages, outline.requestedWords);
   return { compact, coverPage, tocPage, contentPages, wordsTotal, contentSections };
 }
 
@@ -414,8 +608,7 @@ export function blockFromOutlineSection(section: OutlineSection, outline: Outlin
   }
   if (section.layout === "closing")
     return { id: section.id, layout: "closing", title: section.title || outline.title, subtitle: outline.subtitle, bullets: points.slice(0, 3) };
-  if (outline.format === "pptx")
-    return { id: section.id, layout: "bullets", title: section.title, bullets: points.slice(0, 4), notes: points.join(". ") };
+  if (outline.format === "pptx") return { id: section.id, layout: "bullets", title: section.title, bullets: points.slice(0, 4) };
   return { id: section.id, layout: "bullets", title: section.title, bullets: points };
 }
 
@@ -496,6 +689,7 @@ export function designPass(outline: Outline, blocks: Block[], format: Format): D
     format,
     originFormat: format,
     targetPages,
+    requestedWords: outline.requestedWords,
     compact,
     density: 1,
     date: new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
@@ -672,6 +866,7 @@ export function specToOutline(spec: DocumentSpec, format: Format): Outline {
     pageSize: spec.pageSize,
     targetLength,
     lengthSource: spec.targetPages ? "user" : "inferred",
+    requestedWords: spec.requestedWords,
     suggestedLength: suggestedPages(spec.docType, format),
     sections: spec.blocks.map((b) => ({
       id: b.id,

@@ -203,9 +203,8 @@ export async function chatCompletion(opts: CompletionOptions): Promise<string> {
   const finish = data.choices?.[0]?.finish_reason;
   if (!content.trim()) throw new AIError("The model returned an empty response", 502);
   if (finish === "length" && opts.json) {
-    // Truncated JSON is unrecoverable; surface it so the caller can retry smaller.
-    const fixed = tryExtractJSON(content);
-    if (!fixed) throw new AIError("The model response was cut off. Try a shorter document.", 502);
+    // Don't silently return a repairable-but-incomplete outline (e.g. 1 section instead of 12). Surface as error so the caller can retry or fallback.
+    throw new AIError("The model response was cut off (max tokens). Try a shorter document or fewer slides.", 502);
   }
   return stripThinking(content);
 }
@@ -301,8 +300,13 @@ async function chatCompletionZen(opts: CompletionOptions, apiModel: string): Pro
   }
   let str = stripThinking(String(content));
   if (isIncompleteMax && opts.json) {
-    const fixed = tryExtractJSON(str);
-    if (!fixed) throw new AIError("Zen response was cut off. Try a shorter document.", 502);
+    // Zen hit max_output_tokens — even if JSON is repairable it's incomplete (missing sections). Don't return a 1-page skeleton.
+    throw new AIError("Zen response was cut off (max_output_tokens). Try a shorter document or fewer slides.", 502);
+  }
+  // Also guard against non-Zen style finish_reason length masquerading in Zen output
+  const finishReason = (data as any)?.choices?.[0]?.finish_reason ?? (data as any)?.output?.[0]?.finish_reason;
+  if (finishReason === "length" && opts.json) {
+    throw new AIError("The model response was cut off (max tokens). Try a shorter document or fewer slides.", 502);
   }
   return str;
 }
@@ -420,7 +424,7 @@ export async function generateStructured<T>(opts: StructuredOptions<T>): Promise
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
-      const isRetryable = err instanceof AIError && (err.status === 429 || err.status === 503 || msg.includes("RETRYABLE_MAX_TOKENS"));
+      const isRetryable = err instanceof AIError && (err.status === 429 || err.status === 503 || msg.includes("RETRYABLE_MAX_TOKENS") || /only cover|cut off|max_output_tokens/i.test(msg));
       if (isRetryable && attempt < retries) {
         await new Promise((r) => setTimeout(r, isRetryable && msg.includes("RETRYABLE_MAX_TOKENS") ? 800 : 1500));
         lastError = err.message;

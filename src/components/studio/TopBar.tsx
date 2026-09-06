@@ -2,18 +2,14 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Bug, Check, ChevronDown, Download, FileText, House, LayoutList, Link2, Loader2, MoreHorizontal, Presentation, Save, ScanEye, Share2 } from "lucide-react";
-import { useErrorLog } from "@/lib/error/store";
+import { Check, ChevronDown, Download, FileText, House, Link2, Loader2, MoreHorizontal, Presentation, Share2 } from "lucide-react";
 
 export type ExportKind = "pptx" | "docx" | "pdf";
 export type ShareKind = "link" | "file";
-export type SaveState = "saved" | "dirty" | "saving";
 
 type Props = {
   title: string;
   onTitleChange: (v: string) => void;
-  saveState: SaveState;
-  onSave: () => void;
   canExport: boolean;
   exporting: ExportKind | null;
   onExport: (kind: ExportKind) => void;
@@ -22,13 +18,10 @@ type Props = {
   status?: ReactNode;
   isPlanning?: boolean;
   isBusy?: boolean;
-  centerLabel?: "Outline" | "Preview";
   originFormat?: "pptx" | "docx" | "pdf";
 };
 
-export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exporting, onExport, onShare, canShareFile, status, isPlanning, isBusy, centerLabel, originFormat }: Props) {
-  const { errors, hasUnread, open } = useErrorLog();
-  const errCount = errors.length;
+export function TopBar({ title, onTitleChange, canExport, exporting, onExport, onShare, canShareFile, status, isPlanning, isBusy, originFormat }: Props) {
   if (isPlanning) {
     return (
       <header className="relative z-20 flex h-14 shrink-0 items-center justify-between gap-3 border-b border-line/40 bg-white px-3 backdrop-blur md:h-12 md:px-4">
@@ -39,18 +32,6 @@ export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exp
           </svg>
         </Link>
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={open}
-            aria-label={errCount ? `Open error log, ${errCount} errors` : "Open error log"}
-            className={`relative flex h-9 w-9 items-center justify-center rounded-full transition md:h-[32px] md:w-[32px] ${hasUnread ? "bg-red-600 text-white hover:bg-red-700" : "text-ink hover:bg-[#f4f6f4]"} ${errCount && !hasUnread ? "ring-1 ring-line" : ""}`}
-            title={errCount ? `${errCount} error${errCount > 1 ? "s" : ""} — open log` : "Error log — no errors"}
-          >
-            <Bug size={18} className="md:h-4 md:w-4" />
-            {errCount > 0 ? (
-              <span className="absolute -right-0.5 -top-0.5 flex min-h-[16px] min-w-[16px] items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-white">{errCount > 99 ? "99+" : errCount}</span>
-            ) : null}
-          </button>
           <Link
             href="/"
             aria-label="Home"
@@ -89,48 +70,10 @@ export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exp
         />
       </div>
 
-      {centerLabel && (
-        <div className="pointer-events-none absolute left-1/2 top-1/2 hidden -translate-x-1/2 -translate-y-1/2 md:flex">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1 text-xs font-medium tracking-wide text-ink shadow-sm ring-1 ring-line md:px-2.5 md:py-1 md:text-[11px]">
-            {centerLabel === "Outline" ? <LayoutList size={13} className="text-ink md:h-3 md:w-3" /> : <ScanEye size={13} className="text-ink md:h-3 md:w-3" />}
-            {centerLabel}
-          </span>
-        </div>
-      )}
-      {/* mobile center label — shows below 768 as subtle text to avoid crowding title */}
-      {centerLabel && (
-        <div className="pointer-events-none absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 md:hidden">
-          <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-medium tracking-wide text-ink ring-1 ring-line">{centerLabel}</span>
-        </div>
-      )}
-
       {showActions && (
         <div className="flex shrink-0 items-center gap-1.5 md:gap-1">
           {status && <span className="hidden md:inline-flex">{status}</span>}
-          <button
-            type="button"
-            onClick={open}
-            aria-label={errCount ? `Open error log, ${errCount} errors` : "Open error log"}
-            className={`relative flex h-9 w-9 items-center justify-center rounded-full transition md:h-[31px] md:w-[31px] ${hasUnread ? "bg-red-600 text-white hover:bg-red-700" : "bg-white text-ink ring-1 ring-line hover:bg-slate-50"} ${busy ? "opacity-60" : ""}`}
-            title={errCount ? `${errCount} error${errCount > 1 ? "s" : ""} — open log` : "Error log — no errors"}
-          >
-            <Bug size={15} className="md:h-3.5 md:w-3.5" />
-            {errCount > 0 ? (
-              <span className="absolute -right-1 -top-1 flex min-h-[16px] min-w-[16px] items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-white">{errCount > 99 ? "99+" : errCount}</span>
-            ) : null}
-            {hasUnread ? <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-white ring-2 ring-red-600" aria-hidden="true" /> : null}
-          </button>
-          {/* Desktop: Save + Share inline */}
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={busy}
-            className="hidden btn-secondary h-9 px-3 disabled:cursor-not-allowed disabled:opacity-50 md:inline-flex md:h-[31px] md:px-2.5 md:text-xs"
-            title={busy ? "File is updating — please wait" : "Save to library"}
-          >
-            <Save size={15} className="md:h-3.5 md:w-3.5" />
-            <span className="hidden sm:inline">Save</span>
-          </button>
+          {/* Desktop: Share inline (autosave persists to library silently) */}
           <div className="hidden md:flex">
             <Menu
               label={
@@ -153,7 +96,6 @@ export function TopBar({ title, onTitleChange, saveState, onSave, canExport, exp
               className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-ink ring-1 ring-line hover:bg-slate-50 md:h-[31px] md:w-[31px]"
               disabled={busy}
             >
-              <MenuItem icon={<Save size={15} />} label="Save" hint={busy ? "File is updating — please wait" : saveState === "saved" ? "Saved to library" : "Save to library"} disabled={busy} onClick={onSave} />
               <MenuItem icon={<Link2 size={15} />} label="Copy link" hint={busy ? "File is updating — please wait" : "Opens this project in this browser"} disabled={busy} onClick={() => onShare("link")} />
               <MenuItem icon={<Share2 size={15} />} label="Share file…" hint={busy ? "File is updating — please wait" : canShareFile ? "Send the PDF with your device" : "Generate first"} disabled={busy || !canShareFile} onClick={() => onShare("file")} />
             </Menu>

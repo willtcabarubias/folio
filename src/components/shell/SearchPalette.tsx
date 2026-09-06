@@ -31,6 +31,8 @@ const QUICK_STARTS = [
   { icon: UserRound, label: "Resume", prompt: "Make me a one-page resume for a ", keywords: "resume cv one-page" },
   { icon: Briefcase, label: "Proposal", prompt: "Draft a project proposal for ", keywords: "proposal project draft" },
   { icon: BookOpen, label: "Study guide", prompt: "Make a study guide covering ", keywords: "study guide learning notes" },
+  { icon: FileText, label: "Reaction paper", prompt: "Write a reaction paper about ", keywords: "reaction paper reflection response opinion" },
+  { icon: FileText, label: "Lab report", prompt: "Write a lab report with Aim, Method, Results and Discussion for ", keywords: "lab report experiment investigatory science" },
   { icon: LineChart, label: "Business plan", prompt: "Write a business plan for ", keywords: "business plan strategy" },
   { icon: Megaphone, label: "Marketing plan", prompt: "Create a marketing plan for ", keywords: "marketing plan campaign" },
 ] as const;

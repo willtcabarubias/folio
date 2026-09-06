@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { AIError, MISSING_KEY_MESSAGE, generateStructured, isConfigured, type ChatMessage } from "@/lib/ai/client";
-import { MAX_CLARIFY_ROUNDS, agentSystemPrompt, attachmentsToPromptText } from "@/lib/ai/prompts";
-import { normalizeOutline } from "@/lib/spec/normalize";
+import { MAX_CLARIFY_ROUNDS, THEME_UNSUPPORTED_MESSAGE, agentSystemPrompt, attachmentsToPromptText, hasContentRequest, isThemeChangeRequest } from "@/lib/ai/prompts";
+import { CONFIDENCE_THRESHOLD, computeConfidence } from "@/lib/ai/confidence";
+import { normalizeOutline, parseRequestedWords, sanitizeChatMessage } from "@/lib/spec/normalize";
+import { applyTemplateSkeleton, matchTemplate, templateBrief, type DocTemplate } from "@/lib/spec/templates";
 import { AgentResponseSchema, type AgentRequest, type AgentResponse, type Format, type Question } from "@/lib/spec/types";
 
 export const runtime = "nodejs";
@@ -9,6 +11,156 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const ATTACHMENT_BUDGET = 60_000;
+
+/* ------------------------------------------------------------------ */
+/*  Transcript memory: never re-ask an answered dimension               */
+/*                                                                      */
+/*  The free-tier model re-emits format/length questions even after the */
+/*  user answered them, so asked/answered state is reconstructed here   */
+/*  deterministically from history instead of trusting the model.       */
+/* ------------------------------------------------------------------ */
+
+export type AskedAnswered = {
+  askedFormat: boolean;
+  askedLength: boolean;
+  answeredFormat: string | null;
+  answeredLength: string | null;
+  /** Normalized substantive question texts with a non-empty answer. */
+  answeredNormQ: Set<string>;
+  /** Count of answered substantive dimensions (focus/topic/angle/...). */
+  answeredSubstantive: number;
+};
+
+function normQText(s: string): string {
+  return sanitizeChatMessage(s).toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function jaccard(a: string, b: string): number {
+  const A = new Set(a.split(" ").filter(Boolean));
+  const B = new Set(b.split(" ").filter(Boolean));
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const w of A) if (B.has(w)) inter++;
+  return inter / (A.size + B.size - inter);
+}
+
+/** Bucket a question the same way finalize() does (id first, text fallback). */
+function bucketOf(q: { id?: unknown; question?: unknown; options?: unknown }): "format" | "length" | "substantive" {
+  const id = typeof q.id === "string" ? q.id.trim().toLowerCase() : "";
+  const text = `${id} ${typeof q.question === "string" ? q.question : ""}`.toLowerCase();
+  if (id === "format" || (/which format|format\?/.test(text) && /pdf|pptx|docx/.test(text))) return "format";
+  if (id === "length" || /how many slides|how long\?|pages\?|slides\?/.test(text)) return "length";
+  return "substantive";
+}
+
+type AskedRound = { index: number; questions: { id: string; question: string; recommended?: string; options: string[] }[] };
+
+function parseAskedRounds(messages: { role: string; content: string }[]): AskedRound[] {
+  const rounds: AskedRound[] = [];
+  messages.forEach((m, index) => {
+    if (m.role !== "assistant" || !/"kind"\s*:\s*"clarify"/.test(m.content)) return;
+    try {
+      const parsed = JSON.parse(m.content) as { questions?: { id?: string; question?: string; recommended?: string; options?: string[] }[] };
+      if (!Array.isArray(parsed.questions)) return;
+      rounds.push({
+        index,
+        questions: parsed.questions.map((q, i) => ({
+          id: typeof q.id === "string" && q.id.trim() ? q.id.trim() : `q${i + 1}`,
+          question: typeof q.question === "string" ? q.question : "",
+          recommended: typeof q.recommended === "string" ? q.recommended : undefined,
+          options: Array.isArray(q.options) ? q.options.filter((o): o is string => typeof o === "string") : [],
+        })),
+      });
+    } catch {
+      /* not machine JSON (e.g. prose echo) — ignore */
+    }
+  });
+  return rounds;
+}
+
+/** Split a "My answers:" user turn into per-question {question, answer} pairs. */
+function parseAnswerLines(content: string): { question: string; answer: string }[] {
+  const lines = content.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines[0]?.toLowerCase().startsWith("my answers:")) return [];
+  const out: { question: string; answer: string }[] = [];
+  for (const line of lines.slice(1)) {
+    const cleaned = line.replace(/^[•\-*]\s*/, "");
+    const sep = cleaned.search(/(→|->|:)/);
+    if (sep < 0) continue;
+    const rawAnswer = cleaned.slice(sep + (cleaned.startsWith("->", sep) ? 2 : 1));
+    out.push({ question: cleaned.slice(0, sep).trim(), answer: rawAnswer.replace(/^\s*(->|→|:|-)\s*/, "").trim() });
+  }
+  return out;
+}
+
+export function extractAskedAnswered(messages: { role: string; content: string }[]): AskedAnswered {
+  const empty: AskedAnswered = {
+    askedFormat: false, askedLength: false,
+    answeredFormat: null, answeredLength: null,
+    answeredNormQ: new Set(), answeredSubstantive: 0,
+  };
+  const rounds = parseAskedRounds(messages);
+  if (!rounds.length) return empty;
+  for (const r of rounds) {
+    for (const q of r.questions) {
+      const b = bucketOf(q);
+      if (b === "format") empty.askedFormat = true;
+      else if (b === "length") empty.askedLength = true;
+    }
+  }
+  const claim = (roundIdx: number, qi: number, answer: string) => {
+    const round = rounds[roundIdx];
+    const q = round?.questions[qi];
+    const text = answer.trim();
+    if (!q || !text) return;
+    const b = bucketOf(q);
+    if (b === "format") empty.answeredFormat = text;
+    else if (b === "length") empty.answeredLength = text;
+    else {
+      empty.answeredNormQ.add(normQText(q.question));
+      empty.answeredSubstantive += 1;
+    }
+  };
+  messages.forEach((m, i) => {
+    if (m.role !== "user") return;
+    // Whole-round skip: every question of the most recent prior round counts answered.
+    if (/^\s*Use the recommended options and go ahead with the outline\./i.test(m.content.trim())) {
+      const prior = [...rounds].reverse().find((r) => r.index < i);
+      prior?.questions.forEach((q, qi) => {
+        const roundIdx = rounds.indexOf(prior);
+        claim(roundIdx, qi, q.recommended || q.options[0] || "recommended");
+      });
+      return;
+    }
+    const pairs = parseAnswerLines(m.content);
+    if (!pairs.length) return;
+    const prior = [...rounds].reverse().find((r) => r.index < i);
+    if (!prior) return;
+    const roundIdx = rounds.indexOf(prior);
+    pairs.forEach((p, pi) => {
+      // Positional anchor first (answers echo questions in order), text match fallback.
+      const byIndex = prior.questions[pi];
+      const byText = prior.questions.find((q) => normQText(q.question) && normQText(q.question) === normQText(p.question));
+      const target = byIndex && normQText(byIndex.question) === normQText(p.question) ? byIndex : byText ?? byIndex;
+      const qi = target ? prior.questions.indexOf(target) : pi;
+      claim(roundIdx, qi, p.answer);
+    });
+  });
+  return empty;
+}
+
+const REVISION_VERBS = /\b(change|switch|convert|make it|use|instead|rather|redo|turn (it )?into|regenerate as)\b/i;
+
+/** Last-turn revision ("change format to docx") exempts that bucket from suppression. */
+function isFormatRevision(text: string): boolean {
+  return REVISION_VERBS.test(text) && /\b(pdf|pptx|docx|slides?|word|document|deck|presentation)\b/i.test(text);
+}
+function isLengthRevision(text: string): boolean {
+  return (
+    REVISION_VERBS.test(text) &&
+    (/(\d+)\s*\+?\s*(pages?|slides?)\b/i.test(text) || /\b(longer|shorter)\b/i.test(text) || parseRequestedWords(text) !== null)
+  );
+}
 
 export async function POST(req: Request) {
   let body: AgentRequest;
@@ -21,21 +173,60 @@ export async function POST(req: Request) {
   if (!messages.length) return NextResponse.json({ error: "Message is required" }, { status: 400 });
   if (!isConfigured()) return NextResponse.json({ error: MISSING_KEY_MESSAGE, code: "missing_key" }, { status: 500 });
 
+  // Design changes (background/theme/colors) are unsupported: answer deterministically
+  // without spending an LLM call, and never claim one was applied.
+  const lastUserForTheme = messages[messages.length - 1]?.content ?? "";
+  const themeIntent = isThemeChangeRequest(lastUserForTheme);
+  const contentIntent = hasContentRequest(lastUserForTheme);
+  if (themeIntent && !contentIntent) {
+    return NextResponse.json({ kind: "reply", message: THEME_UNSUPPORTED_MESSAGE });
+  }
+
   const attachments = (body.attachments ?? []).filter((a) => a && (a.text?.trim() || (a as any).isImage)).slice(0, 8);
   const clarifyRounds = messages.filter((m) => m.role === "assistant" && /"kind"\s*:\s*"clarify"/.test(m.content)).length;
   const hasOutline = Boolean(body.currentOutline);
+
+  // Deterministic understanding gate (never trust the model to judge itself).
+  // Transcript memory: what was already asked + answered (never re-ask it).
+  const askedAnswered = body.currentOutline ? null : extractAskedAnswered(messages);
+  const userText = messages.filter((m) => m.role === "user").map((m) => m.content).join("\n");
+  const parsedWords = parseRequestedWords(userText);
+  const confidence = computeConfidence({
+    userText,
+    lastUserText: messages[messages.length - 1]?.content ?? "",
+    preferredFormat: body.preferredFormat,
+    hasAttachments: attachments.length > 0,
+    answeredFormat: askedAnswered?.answeredFormat,
+    answeredLength: askedAnswered?.answeredLength,
+    answeredSubstantive: askedAnswered?.answeredSubstantive ?? 0,
+  });
+  const answeredSummary = askedAnswered
+    ? [
+        askedAnswered.answeredFormat ? `format → ${askedAnswered.answeredFormat}` : "",
+        askedAnswered.answeredLength ? `length → ${askedAnswered.answeredLength}` : "",
+        askedAnswered.answeredSubstantive > 0 ? `focus/substantive dimensions answered: ${askedAnswered.answeredSubstantive}` : "",
+      ]
+        .filter(Boolean)
+        .join("; ")
+    : "";
 
   const system = agentSystemPrompt({
     clarifyRounds,
     hasAttachments: attachments.length > 0,
     preferredFormat: body.preferredFormat,
     hasOutline,
+    confidence: hasOutline ? undefined : { ...confidence },
+    answeredSummary: answeredSummary || undefined,
   });
 
   const convo: ChatMessage[] = messages.slice(-16).map((m) => ({ role: m.role, content: m.content.slice(0, 12_000) }));
 
   // Context block goes right before the latest user message so it stays salient.
   const contextParts: string[] = [];
+  // School template match: seed the planner with the expected section flow.
+  // Skipped when the user already has an outline (their edits are source of truth).
+  const template: DocTemplate | null = body.currentOutline ? null : matchTemplate(messages.filter((m) => m.role === "user").map((m) => m.content).join("\n"));
+  if (template) contextParts.push(templateBrief(template));
   // For vision, keep text attachments in prompt text; images will be sent as vision parts (no base64 in text)
   const textAtts = attachments.filter((a) => !(a as any).isImage);
   const imageAtts = attachments.filter((a) => (a as any).isImage && (a as any).dataUrl);
@@ -85,7 +276,7 @@ export async function POST(req: Request) {
     const lastUserRaw = messages[messages.length - 1]?.content ?? "";
     const isVagueFileTask =
       attachments.length > 0 &&
-      /summar|summry|explain|describe|what.*is.*this|what.*does.*this|what.*say|tell.*about|identify|what.*wrong|what.*issue|critique|review this|extract|find.*(wrong|issue|error|problem)/i.test(lastUserRaw);
+      /summar|summry|explain|describe|what.*is.*this|what.*does.*this|what.*say|tell.*about|identify|what.*wrong|what.*issue|critique|review this|extract|find.*(wrong|issue|error|problem)|\b(hi|hello|hey|help|make|do|fix)\b.{0,40}\b(this|that|it)\b|\bhelp with\b|\bmake something\b|\bpl[sz]?\s+make\b/i.test(lastUserRaw);
     const isGenericExplainReply =
       attachments.length > 0 &&
       result.kind === "reply" &&
@@ -108,7 +299,93 @@ export async function POST(req: Request) {
       });
     }
 
-    const response = finalize(result, body.preferredFormat);
+    // Mixed request (content + theme tweak): content flows normally, but the model
+    // must not claim the design part was applied. Catch the hallucinated "Done".
+    if (themeIntent && contentIntent && result.kind === "reply") {
+      const msg = (result as { message: string }).message ?? "";
+      if (/done.{0,60}(background|theme|dark|color|colour)|updated the background|changed.{0,30}to dark|redesign.{0,30}(done|complete)/i.test(msg)) {
+        result = { kind: "reply", message: THEME_UNSUPPORTED_MESSAGE } as typeof result;
+      }
+    }
+    // Hard gate (inverse of the force-outline above): missing format/length, or a
+    // thin topic with no focus answered yet, must clarify in ONE turn — never
+    // hallucinate a file. A low score alone no longer forces repeats once every
+    // dimension is answered (that loop caused re-asked questions).
+    const mustClarify =
+      !hasOutline &&
+      clarifyRounds < MAX_CLARIFY_ROUNDS &&
+      (confidence.missingFormat ||
+        confidence.missingLength ||
+        (confidence.score < CONFIDENCE_THRESHOLD && confidence.topicCount < 3 && !confidence.focusAnswered));
+    if (mustClarify && result.kind === "outline") {
+      const need: string[] = [];
+      if (confidence.score < CONFIDENCE_THRESHOLD && confidence.topicCount < 3 && !confidence.focusAnswered)
+        need.push(`understanding is only ${confidence.score}/100 with a thin topic`);
+      if (confidence.missingFormat) need.push("format not stated");
+      if (confidence.missingLength) need.push("length not stated");
+      result = await generateStructured({
+        schema: AgentResponseSchema,
+        system,
+        messages: [
+          ...convo,
+          {
+            role: "user",
+            content: `Do NOT produce an outline yet (${need.join("; ")}). Return kind "clarify" in ONE single turn: substantive focus question(s) first (hybrid with write-your-own placeholder), then the missing format question (second-last) and/or length question (absolute last) as needed, max 4 total. JSON only.`,
+          },
+        ],
+        maxTokens: 6000,
+        temperature: 0.4,
+        label: "Planner-force-clarify",
+      });
+    }
+    let response = finalize(result, body.preferredFormat, parsedWords, template, askedAnswered, lastUserRaw);
+    // Suppression consumed every question: the model only repeated answered
+    // dimensions. Force the outline (bounded, same pattern as the MAX path) —
+    // never stall on the "tell me more" reply fallback.
+    if (result.kind === "clarify" && response.kind === "reply" && askedAnswered &&
+      (askedAnswered.answeredFormat || askedAnswered.answeredLength || askedAnswered.answeredNormQ.size > 0)) {
+      result = await generateStructured({
+        schema: AgentResponseSchema,
+        system,
+        messages: [
+          ...convo,
+          {
+            role: "user",
+            content:
+              "All needed answers were already given (see My answers in history). Do not ask more questions. Produce the outline now with sensible defaults, honoring the answered format and length.",
+          },
+        ],
+        maxTokens: 6000,
+        temperature: 0.4,
+        label: "Planner-suppression-empty",
+      });
+      response = finalize(result, body.preferredFormat, parsedWords, template, null, lastUserRaw);
+    }
+    if (themeIntent && contentIntent && response.kind === "outline") {
+      response = { ...response, message: `${response.message} (Note: background/theme changes aren't supported yet — content updates applied.)` };
+    }
+    // Cover-only guard: retry once instead of silently returning a header-only doc.
+    if (response.kind === "outline" && response.outline.lengthSource === "user" && response.outline.targetLength >= 2) {
+      const contentSections = response.outline.sections.filter((s) => s.layout !== "cover" && s.layout !== "agenda").length;
+      if (contentSections === 0) {
+        const retry = await generateStructured({
+          schema: AgentResponseSchema,
+          system,
+          messages: [
+            ...convo,
+            { role: "assistant", content: JSON.stringify(result).slice(0, 12000) },
+            {
+              role: "user",
+              content: `Your outline has only a cover and no content sections, but the user explicitly asked for ${response.outline.requestedWords ? `${response.outline.requestedWords} words (${response.outline.targetLength} pages)` : `${response.outline.targetLength} ${response.outline.format === "pptx" ? "slides" : "pages"}`}. Return the FULL corrected outline JSON now with at least ${Math.max(4, Math.min(response.outline.targetLength * 2, 7))} sections (cover first, then content sections, then closing where the type calls for it), keeping the same title/format. No commentary, JSON only.`,
+            },
+          ],
+          maxTokens: 6000,
+          temperature: 0.3,
+          label: "Planner-repair-cover-only",
+        });
+        response = finalize(retry, body.preferredFormat, parsedWords, template, askedAnswered, lastUserRaw);
+      }
+    }
     return NextResponse.json(response);
   } catch (err) {
     const status = err instanceof AIError ? err.status : 500;
@@ -119,18 +396,29 @@ export async function POST(req: Request) {
   }
 }
 
-function finalize(result: unknown, preferred?: Format | "auto"): AgentResponse {
+export function finalize(
+  result: unknown,
+  preferred?: Format | "auto",
+  parsedWords?: { words: number; pages: number } | null,
+  template?: DocTemplate | null,
+  askedAnswered?: AskedAnswered | null,
+  lastUserText?: string,
+): AgentResponse {
   const r = result as { kind: string; message: string; questions?: unknown[]; outline?: unknown };
   if (r.kind === "clarify") {
     let questions = (r.questions as { id?: string; question: string; options: string[]; recommended?: string; allowMultiple: boolean; ui?: string; placeholder?: string }[])
       .map((q, i): Question => {
-        const options = dedupe(q.options.map((o) => o.trim()).filter(Boolean)).slice(0, 6);
-        const recommended = q.recommended && options.includes(q.recommended) ? q.recommended : options[0];
+        const options = dedupe(q.options.map((o) => sanitizeChatMessage(o)).filter(Boolean)).slice(0, 6);
+        const recommended = q.recommended && options.includes(sanitizeChatMessage(q.recommended)) ? sanitizeChatMessage(q.recommended) : options[0];
         const uiRaw = typeof q.ui === "string" ? q.ui.toLowerCase().trim() : undefined;
         const ui = uiRaw === "radio" || uiRaw === "checkbox" || uiRaw === "text" || uiRaw === "hybrid" ? (uiRaw as Question["ui"]) : undefined;
         // infer ui from allowMultiple when not provided: multi → checkbox, single+options→ hybrid (options + Other field), no options→ text
-        const inferredUi: Question["ui"] = ui ?? (options.length === 0 ? "text" : q.allowMultiple ? "checkbox" : "hybrid");
-        return { id: q.id?.trim() || `q${i + 1}`, question: q.question.trim(), options, recommended, allowMultiple: q.allowMultiple, ui: inferredUi, placeholder: typeof q.placeholder === "string" && q.placeholder.trim() ? q.placeholder.trim().slice(0, 80) : undefined };
+        let inferredUi: Question["ui"] = ui ?? (options.length === 0 ? "text" : q.allowMultiple ? "checkbox" : "hybrid");
+        // Shaping questions must always offer write-your-own: substantive singles
+        // are never pure radio (format/length/checkbox-multi keep their ui).
+        const qid = (q.id ?? "").trim().toLowerCase();
+        if (qid !== "format" && qid !== "length" && !q.allowMultiple && options.length > 0) inferredUi = "hybrid";
+        return { id: q.id?.trim() || `q${i + 1}`, question: sanitizeChatMessage(q.question), options, recommended, allowMultiple: q.allowMultiple, ui: inferredUi, placeholder: typeof q.placeholder === "string" && q.placeholder.trim() ? sanitizeChatMessage(q.placeholder).slice(0, 80) || undefined : undefined };
       })
       .filter((q) => q.question);
     // Reorder: substantive first, format/length last (length absolute last) — UX: pages/decks question will be last
@@ -146,6 +434,21 @@ function finalize(result: unknown, preferred?: Format | "auto"): AgentResponse {
     const formats = questions.filter(isFormatQ);
     const lengths = questions.filter(isLengthQ);
     questions = [...substantive, ...formats, ...lengths];
+    // Length questions must offer a real choice: degenerate single-option sets
+    // (e.g. invoice → ["1 page"]) get tiered defaults so the stepper/custom
+    // field always has short / standard / detailed to work with.
+    const tierDefaults = (q: Question): { options: string[]; placeholder: string } => {
+      const text = `${q.question} ${q.options.join(" ")}`.toLowerCase();
+      const slides = preferred === "pptx" || /slide/.test(text);
+      return slides
+        ? { options: ["Short (5-6 slides)", "Standard (10-12 slides)", "Detailed (18-20 slides)"], placeholder: "e.g., 12 slides" }
+        : { options: ["Short (1 page)", "Standard (2-4 pages)", "Detailed (6+ pages)"], placeholder: "e.g., 5 pages" };
+    };
+    questions = questions.map((q) => {
+      if (!isLengthQ(q) || q.options.length >= 2) return q;
+      const d = tierDefaults(q);
+      return { ...q, options: d.options, recommended: d.options[1], placeholder: q.placeholder ?? d.placeholder };
+    });
     // Hardening: if preferredFormat is already fixed (quick-start or user stated), strip any hallucinated format question (prod bug: double-ask)
     if (preferred && preferred !== "auto") {
       const before = questions.length;
@@ -164,12 +467,40 @@ function finalize(result: unknown, preferred?: Format | "auto"): AgentResponse {
     if (preferred && preferred !== "auto") {
       questions = questions.map((q) => {
         if (q.id === "length" && preferred === "pptx" && /how long\?/i.test(q.question)) {
-          return { ...q, question: "How many slides?", options: q.options.some((o) => /\d/.test(o)) ? q.options : ["6", "10-12", "15"], placeholder: "e.g., 12 slides" };
+          return { ...q, question: "How many slides?", options: q.options.some((o) => /\d/.test(o)) ? q.options : ["Short (5-6 slides)", "Standard (10-12 slides)", "Detailed (18-20 slides)"], placeholder: "e.g., 12 slides" };
         }
         if (q.id === "length" && preferred !== "pptx" && /how many slides/i.test(q.question)) {
-          return { ...q, question: "How long?", options: ["1 page", "2-4 pages", "6 pages"], placeholder: "e.g., 5 pages" };
+          return { ...q, question: "How long?", options: ["Short (1 page)", "Standard (2-4 pages)", "Detailed (6+ pages)"], placeholder: "e.g., 5 pages" };
         }
         return q;
+      });
+    }
+    // Deterministic no-repeat: drop already-answered dimensions (a last-turn
+    // revision exempts only its own bucket). Runs before the cap so
+    // tail-protection can never resurrect a suppressed repeat. Answers act as
+    // sticky preferences until the user revises them.
+    if (askedAnswered) {
+      const lastText = lastUserText ?? "";
+      const revF = isFormatRevision(lastText);
+      const revL = isLengthRevision(lastText);
+      const seenBucket: Record<"format" | "length", boolean> = { format: false, length: false };
+      questions = questions.filter((q) => {
+        if (isFormatQ(q)) {
+          if (seenBucket.format) return false;
+          seenBucket.format = true;
+          return revF || !askedAnswered.answeredFormat;
+        }
+        if (isLengthQ(q)) {
+          if (seenBucket.length) return false;
+          seenBucket.length = true;
+          return revL || !askedAnswered.answeredLength;
+        }
+        const nq = normQText(q.question);
+        if (!nq) return true;
+        for (const aq of askedAnswered.answeredNormQ) {
+          if (nq === aq || jaccard(nq, aq) >= 0.9) return false;
+        }
+        return true;
       });
     }
     // Enforce single-turn cap: max 4 questions (UX) — drop extras beyond 4, keep tail (format/length) protected
@@ -179,16 +510,43 @@ function finalize(result: unknown, preferred?: Format | "auto"): AgentResponse {
       const head = questions.filter((q) => !isFormatQ(q) && !isLengthQ(q)).slice(0, headCap);
       questions = [...head, ...tail];
     }
-    if (!questions.length) return { kind: "reply", message: r.message || "Tell me a bit more about what you need." };
-    return { kind: "clarify", message: r.message || "A couple of quick questions to shape this well:", questions };
+    if (!questions.length) return { kind: "reply", message: sanitizeChatMessage(r.message) || "Tell me a bit more about what you need." };
+    return { kind: "clarify", message: sanitizeChatMessage(r.message) || "A couple of quick questions to shape this well:", questions };
   }
   if (r.kind === "outline") {
-    const o = r.outline as Parameters<typeof normalizeOutline>[0];
+    const o = r.outline as Parameters<typeof normalizeOutline>[0] & { requestedWords?: number };
     if (preferred && preferred !== "auto") o.format = preferred;
+    // Deterministic override: never trust the free-tier model with word/char counts.
+    if (parsedWords) {
+      o.requestedWords = parsedWords.words;
+      o.targetLength = parsedWords.pages;
+      (o as { lengthSource?: string }).lengthSource = "user";
+    }
+    // Guard absurd values the model sometimes emits (e.g. targetLength: 500 from "500 words").
+    if (typeof o.targetLength === "number" && o.targetLength > 30) {
+      o.targetLength = parsedWords ? parsedWords.pages : 30;
+      if (parsedWords) (o as { lengthSource?: string }).lengthSource = "user";
+    }
+    // Template default length when the model left it inferred-and-empty.
+    if (template && (o as { lengthSource?: string }).lengthSource !== "user" && !o.targetLength) {
+      o.targetLength = template.targetLength;
+    }
     const outline = normalizeOutline(o);
-    return { kind: "outline", message: r.message || "Here is the outline. Edit anything, then generate.", outline };
+    // Pad-only skeleton enforcement: missing template sections are appended,
+    // user customizations are never removed or reordered.
+    if (template) {
+      const seen = new Set(outline.sections.map((s) => s.id));
+      let n = 0;
+      outline.sections = applyTemplateSkeleton(outline.sections, template, (base) => {
+        let id = `${base}${++n}`;
+        while (seen.has(id)) id = `${base}${++n}`;
+        seen.add(id);
+        return id;
+      }) as typeof outline.sections;
+    }
+    return { kind: "outline", message: sanitizeChatMessage(r.message) || "Here is the outline. Edit anything, then generate.", outline };
   }
-  return { kind: "reply", message: r.message || "How can I help?" };
+  return { kind: "reply", message: sanitizeChatMessage(r.message) || "How can I help?" };
 }
 
 function dedupe(list: string[]): string[] {

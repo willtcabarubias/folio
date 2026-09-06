@@ -5,17 +5,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Bot, Check, Loader2, MessageSquare, Paperclip, ScanEye, Sparkles } from "lucide-react";
 import { ApiError, askAgent, downloadBlob, expandOutline, expandOutlineStream, extractFile, renderFile, renderPreview, reportApiError } from "@/lib/client/api";
 import type { AgentResponse, Attachment, ChatTurn, DocumentSpec, Format, Outline } from "@/lib/spec/types";
+
 import { getProject, newId, saveProject, type Project } from "@/lib/store/projects";
 import { ChatThread, type ThreadMessage } from "./ChatThread";
 import { EditablePreview } from "./EditablePreview";
+import { OutlineEditor } from "./OutlineEditor";
 import { PdfPreview } from "./PdfPreview";
 import { PromptBox } from "./PromptBox";
-import { TopBar, type ExportKind, type SaveState, type ShareKind } from "./TopBar";
+import { TopBar, type ExportKind, type ShareKind } from "./TopBar";
 import type { GenState } from "./SettingsPanel";
 
 
 type Pane = "chat" | "doc";
-type Tab = "outline" | "preview";
+/** Document pane view: outline plan, true-file preview (default), or fluid card editor. */
+type Tab = "outline" | "preview" | "edit";
 
 function isGreetingTitle(t: string): boolean {
   const s = t.trim().toLowerCase();
@@ -23,7 +26,7 @@ function isGreetingTitle(t: string): boolean {
 }
 
 function fingerprint(o: Outline): string {
-  return JSON.stringify([o.format, o.title, o.subtitle, o.docType, o.audience, o.tone, o.language, o.pageSize, o.targetLength, o.sections.map((s) => [s.title, s.layout, s.points])]);
+  return JSON.stringify([o.format, o.title, o.subtitle, o.docType, o.audience, o.tone, o.language, o.pageSize, o.targetLength, o.requestedWords ?? null, o.sections.map((s) => [s.title, s.layout, s.points])]);
 }
 
 function compactResponse(r: AgentResponse | undefined, text: string): string {
@@ -33,7 +36,7 @@ function compactResponse(r: AgentResponse | undefined, text: string): string {
     return JSON.stringify({
       kind: "outline",
       message: r.message,
-      outline: { title: o.title, subtitle: o.subtitle, format: o.format, docType: o.docType, audience: o.audience, tone: o.tone, language: o.language, targetLength: o.targetLength, lengthSource: o.lengthSource, sections: o.sections },
+      outline: { title: o.title, subtitle: o.subtitle, format: o.format, docType: o.docType, audience: o.audience, tone: o.tone, language: o.language, targetLength: o.targetLength, lengthSource: o.lengthSource, requestedWords: o.requestedWords ?? null, sections: o.sections },
     });
   }
   return JSON.stringify(r);
@@ -55,7 +58,8 @@ export function Builder({ id }: { id: string }) {
   const [previewBusy, setPreviewBusy] = useState(false);
   const [tab, setTab] = useState<Tab>("outline");
   const [pane, setPane] = useState<Pane>("doc");
-  const [saveState, setSaveState] = useState<SaveState>("saved");
+  // Autosave runs silently in the background (no manual save button in the UI).
+  const [, setSaveState] = useState<"saved" | "dirty" | "saving">("saved");
   const [exporting, setExporting] = useState<ExportKind | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -130,6 +134,7 @@ export function Builder({ id }: { id: string }) {
 
   const allReadyAttachments = useMemo(() => [...committedAttachments, ...attachments].filter((a) => a.status === "ready"), [committedAttachments, attachments]);
   const displayTitle = (isUserEdited.current ? title : outline?.title ?? spec?.title ?? title) || spec?.title || outline?.title || title || "Untitled";
+  // Word-count plumbing stays internal (budgets/top-up); no chip in the UI.
 
   const buildProject = useCallback(
     (): Project => ({
@@ -268,6 +273,22 @@ export function Builder({ id }: { id: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded, spec]);
 
+  // Preview refresh flag: set on manual spec edits, consumed by the debounced
+  // re-render effect below (no loop: loadPreview never touches this flag).
+  const [needsPreview, setNeedsPreview] = useState(false);
+
+  // Re-render the true-file preview after manual edits (debounced; never loops:
+  // loadPreview only touches preview/previewBusy, never spec or needsPreview).
+  useEffect(() => {
+    if (!spec || !needsPreview || generating || previewBusy || busy || gen.status !== "ready") return;
+    const t = setTimeout(() => {
+      setNeedsPreview(false);
+      void loadPreview(spec, spec.format);
+    }, 900);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spec, needsPreview, generating, previewBusy, busy, gen.status]);
+
   const doGenerateRef = useRef<((targetOutline: Outline, transcriptOverride?: ChatTurn[]) => Promise<void>) | null>(null);
   const doGenerate = useCallback(async (targetOutline: Outline, transcriptOverride?: ChatTurn[]) => {
     const effectiveTitle = (() => {
@@ -292,6 +313,7 @@ export function Builder({ id }: { id: string }) {
       theme: target.theme,
       pageSize: target.pageSize,
       targetLength: target.targetLength,
+      requestedWords: target.requestedWords,
       blocks: [],
       format: target.format,
     } as unknown as DocumentSpec;
@@ -371,9 +393,10 @@ export function Builder({ id }: { id: string }) {
     await doGenerate(outline);
   };
 
-  // Handle spec edits from EditablePreview (inline edit / drag reorder)
+  // Handle spec edits from EditablePreview (inline edit / layout / reorder)
   const handleSpecChange = useCallback((next: DocumentSpec) => {
     setSpec(next);
+    setNeedsPreview(true);
     // keep preview stale tracking: spec edits are source of truth, don't mark stale
     // but we update title sync if needed
   }, []);
@@ -581,15 +604,9 @@ export function Builder({ id }: { id: string }) {
         isPlanning={planning}
         isBusy={generating || previewBusy}
         title={displayTitle}
-        centerLabel={planning ? undefined : hasGenerated ? "Preview" : "Outline"}
         onTitleChange={(v) => {
           isUserEdited.current = true;
           setTitle(v);
-        }}
-        saveState={saveState}
-        onSave={() => {
-          save();
-          showToast("Saved to library");
         }}
         canExport={Boolean(spec)}
         exporting={exporting}
@@ -669,10 +686,51 @@ export function Builder({ id }: { id: string }) {
 
             {/* Document */}
             <section className={`${pane === "doc" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col bg-shell lg:flex`}>
+              {outline && spec && !generating && (
+                <div className="flex shrink-0 items-center justify-center border-b border-line/40 bg-white/70 px-3 py-1.5">
+                  <div className="flex rounded-full bg-[#f4f6f4] p-0.5 ring-1 ring-line/40">
+                    {(["outline", "preview", "edit"] as Tab[]).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setTab(t)}
+                        title={t === "preview" ? "Actual file preview" : t === "edit" ? "Edit content cards" : "Edit plan"}
+                        className={`rounded-full px-3 py-1 text-xs font-medium capitalize transition ${tab === t ? "bg-ink text-white" : "text-muted"}`}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {stale && spec && !generating && (
+                <div className="flex shrink-0 items-center justify-center gap-2 border-b border-line/40 bg-amber-50 px-3 py-1.5 text-xs font-medium text-ink">
+                  <span>Outline changed — preview is out of date</span>
+                  <button type="button" onClick={generate} className="btn-primary h-7 px-3 text-xs">
+                    Regenerate
+                  </button>
+                </div>
+              )}
               <div className="min-h-0 flex-1 relative">
                 {spec ? (
-                  <>
+                  tab === "outline" && outline && !generating ? (
+                    <div className="scroll-thin h-full overflow-y-auto px-3 py-5 md:px-6">
+                      <OutlineEditor outline={outline} onChange={setOutline} disabled={busy} />
+                    </div>
+                  ) : generating ? (
                     <EditablePreview spec={spec} onChange={handleSpecChange} busy={generating || previewBusy || busy} streaming={gen.status === "writing"} />
+                  ) : tab === "edit" ? (
+                    <EditablePreview spec={spec} onChange={handleSpecChange} busy={previewBusy || busy} streaming={false} />
+                  ) : (
+                  <>
+                    <PdfPreview
+                      data={preview?.data ?? null}
+                      kind={spec.format === "pptx" ? "slides" : "pages"}
+                      busy={previewBusy}
+                      busyLabel="Rendering preview…"
+                      emptyTitle="No preview yet"
+                      emptyHint="Generate to write the content and render the document."
+                    />
                     {gen.status === "error" && (!spec || spec.blocks.length === 0) && (
                       <div className="pointer-events-none absolute inset-x-0 bottom-6 flex justify-center">
                         <button type="button" onClick={generate} className="pointer-events-auto btn-primary shadow-float">
@@ -692,6 +750,20 @@ export function Builder({ id }: { id: string }) {
                       </div>
                     )}
                   </>
+                  )
+                ) : outline && (gen.status === "idle" || gen.status === "error") ? (
+                  <div className="scroll-thin h-full overflow-y-auto px-3 py-5 md:px-6">
+                    <div className="mx-auto mb-3 flex w-full max-w-3xl items-center justify-between gap-2">
+                      <p className="text-xs font-medium text-muted">Review the plan, then generate your document.</p>
+                      <button type="button" onClick={generate} className="btn-primary h-8 px-4 text-xs">
+                        Generate
+                      </button>
+                    </div>
+                    <OutlineEditor outline={outline} onChange={setOutline} disabled={busy} />
+                    {gen.status === "error" && (
+                      <p className="mx-auto mt-3 w-full max-w-3xl text-center text-xs text-danger">{gen.message}</p>
+                    )}
+                  </div>
                 ) : (
                   <div className="flex h-full flex-col items-center justify-center p-8 text-center">
                     {gen.status === "writing" ? (
