@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, Bot, Check, Loader2, MessageSquare, Paperclip, ScanEye, Sparkles } from "lucide-react";
+import { AlertCircle, Bot, Check, Loader2, MessageSquare, Paperclip, Pencil, ScanEye, Sparkles } from "lucide-react";
 import { ApiError, askAgent, downloadBlob, expandOutline, expandOutlineStream, extractFile, renderFile, renderPreview, reportApiError } from "@/lib/client/api";
 import type { AgentResponse, Attachment, ChatTurn, DocumentSpec, Format, Outline } from "@/lib/spec/types";
 
@@ -668,25 +668,41 @@ export function Builder({ id }: { id: string }) {
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          {/* Pane switcher (small screens) — chat/doc only, no settings */}
+          {/* Unified switcher (small screens) — Chat | Preview | Edit in one row */}
           <div className="flex items-center justify-center border-b border-line/40 bg-white px-3 py-2 lg:hidden">
             <div className="flex rounded-full bg-[#f4f6f4] p-0.5 ring-1 ring-line/40">
-              {(
-                [
-                  { id: "chat", label: "Chat", icon: MessageSquare },
-                  { id: "doc", label: "Document", icon: ScanEye },
-                ] as { id: Pane; label: string; icon: typeof MessageSquare }[]
-              ).map(({ id: pid, label, icon: Icon }) => (
-                <button
-                  key={pid}
-                  type="button"
-                  onClick={() => setPane(pid)}
-                  className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition md:px-2.5 md:py-1 md:text-[11px] ${pane === pid ? "bg-ink text-white" : "text-muted"}`}
-                >
-                  <Icon size={13} className="md:h-3 md:w-3" />
-                  {label}
-                </button>
-              ))}
+              <button
+                type="button"
+                onClick={() => setPane("chat")}
+                className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition ${pane === "chat" ? "bg-ink text-white" : "text-muted"}`}
+              >
+                <MessageSquare size={13} />
+                Chat
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPane("doc");
+                  setTab("preview");
+                }}
+                title="Actual file preview"
+                className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium capitalize transition ${pane === "doc" && tab !== "edit" ? "bg-ink text-white" : "text-muted"}`}
+              >
+                <ScanEye size={13} />
+                Preview
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPane("doc");
+                  setTab("edit");
+                }}
+                title="Edit content cards"
+                className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium capitalize transition ${pane === "doc" && tab === "edit" ? "bg-ink text-white" : "text-muted"}`}
+              >
+                <Pencil size={13} />
+                Edit
+              </button>
             </div>
           </div>
 
@@ -716,7 +732,7 @@ export function Builder({ id }: { id: string }) {
             {/* Document */}
             <section className={`${pane === "doc" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col bg-shell lg:flex`}>
               {outline && spec && !generating && (
-                <div className="flex shrink-0 items-center justify-center border-b border-line/40 bg-white/70 px-3 py-1.5">
+                <div className="hidden shrink-0 items-center justify-center border-b border-line/40 bg-white/70 px-3 py-1.5 lg:flex">
                   <div className="flex rounded-full bg-[#f4f6f4] p-0.5 ring-1 ring-line/40">
                     {(["outline", "preview", "edit"] as Tab[]).map((t) => (
                       <button

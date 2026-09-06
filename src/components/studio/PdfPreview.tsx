@@ -83,9 +83,48 @@ export function PdfPreview({ data, kind, busy, busyLabel, emptyTitle, emptyHint 
     );
   }
 
+  const isLegacyError = error ? /tohex|to_hex|hashoriginal/i.test(error) : false;
+  const openNativePdf = () => {
+    try {
+      const blob = new Blob([data.slice(0)], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener");
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch {
+      // Native open is best-effort; Export download remains available in TopBar.
+    }
+  };
+  const downloadNativePdf = () => {
+    try {
+      const blob = new Blob([data.slice(0)], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "document.pdf";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    } catch {
+      // no-op
+    }
+  };
+
   return (
     <div className="scroll-thin h-full overflow-y-auto px-4 py-6 md:px-8">
-      {error && <p className="mx-auto mb-4 max-w-3xl rounded-2xl bg-red-50 px-4 py-2.5 text-sm text-danger ring-1 ring-red-100">{error}</p>}
+      {error && (
+        <div className="mx-auto mb-4 max-w-3xl rounded-2xl bg-red-50 px-4 py-2.5 text-sm text-danger ring-1 ring-red-100">
+          <p>{isLegacyError ? "Preview needs a newer browser on this device — your file is fine." : error}</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button type="button" onClick={openNativePdf} className="rounded-full bg-ink px-3 py-1 text-xs font-medium text-white">
+              Open PDF
+            </button>
+            <button type="button" onClick={downloadNativePdf} className="rounded-full bg-white px-3 py-1 text-xs font-medium text-ink ring-1 ring-line">
+              Download PDF
+            </button>
+          </div>
+        </div>
+      )}
       <div className={`mx-auto flex flex-col gap-6 ${kind === "slides" ? "max-w-4xl" : "max-w-[820px]"}`}>
         {pages.map((p, i) => (
           <figure key={p.url} className="animate-rise">
