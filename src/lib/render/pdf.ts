@@ -142,25 +142,59 @@ function paragraphs(L: Layout, body: string, o: { size?: number; color?: string 
 }
 
 function ornamentLinesDiagonal(L: Layout, opacity = 1) {
-  // Top-right corner: 6 thin flowing lines mimicking reference wavy lines
+  // Reference: Screenshot 2026-09-05 — long sweeping wavy hairlines, top-right + bottom-left.
+  // 8 thin curves arcing from the page edge (not short straight ticks).
   const c = L.c.line;
   const W = L.W;
   const H = L.H;
-  const drawSet = (ox: number, oy: number, flipY = 1) => {
-    for (let i = 0; i < 6; i++) {
-      const yOff = i * 7;
-      const x1 = ox - 12;
+  const drawSet = (ox: number, oy: number, flipY = 1, mirror = false) => {
+    for (let i = 0; i < 8; i++) {
+      const yOff = i * 8;
+      const x1 = mirror ? ox : ox - 30 - i * 3;
       const y1 = oy + yOff * flipY;
-      const x2 = ox + 70 + i * 4;
-      const y2 = oy + yOff * flipY - 14 - i * 1.5;
-      // Bezier-ish: two segments for slight curve
-      L.doc.save().lineWidth(0.5).strokeColor(L.hex(c)).opacity(0.55 * opacity).moveTo(x1, y1).bezierCurveTo(x1 + 30, y1 - 8 * flipY, x2 - 30, y2 + 8 * flipY, x2, y2).stroke().restore();
+      const x2 = mirror ? ox + 110 + i * 5 : ox + 90 + i * 5;
+      const y2 = oy + yOff * flipY - 26 - i * 2;
+      // Long sweep: control points far apart for a gentle S-curve like the reference.
+      L.doc.save().lineWidth(0.55).strokeColor(L.hex(c)).opacity(0.5 * opacity).moveTo(x1, y1).bezierCurveTo(x1 + 45, y1 - 14 * flipY, x2 - 45, y2 + 14 * flipY, x2, y2).stroke().restore();
     }
   };
-  // Top right
-  drawSet(W - 10, 18, 1);
-  // Bottom left
-  drawSet(18, H - 26, -1);
+  // Top right (sweeping in from the edge)
+  drawSet(W - 10, 6, 1, false);
+  // Bottom left (mirrored)
+  drawSet(-72, H - 78, -1, true);
+}
+
+function ornamentDots(L: Layout, opacity = 1) {
+  // Playful: gradient dot field fading from the corners (top-right dense → sparse).
+  // Uses primary at low opacity so it tints per-theme (coral/plum) without new colors.
+  const W = L.W;
+  const H = L.H;
+  const dot = (cx: number, cy: number, r: number, o: number) => {
+    L.doc.save().fillOpacity(Math.max(0, Math.min(1, o * opacity))).circle(cx, cy, r).fill(L.hex(L.c.primary)).restore();
+  };
+  // Top-right gradient: 4 rows × 5 cols, shrinking + fading inward.
+  for (let r = 0; r < 4; r++) {
+    for (let cIdx = 0; cIdx < 5; cIdx++) {
+      const cx = W - 14 - cIdx * 13 - r * 4;
+      const cy = 14 + r * 13 + cIdx * 2;
+      const rad = Math.max(0.7, 2.4 - (r + cIdx) * 0.35);
+      dot(cx, cy, rad, 0.32 - (r + cIdx) * 0.045);
+    }
+  }
+  // Bottom-left mirror, sparser.
+  for (let r = 0; r < 3; r++) {
+    for (let cIdx = 0; cIdx < 4; cIdx++) {
+      const cx = 14 + cIdx * 13 + r * 4;
+      const cy = H - 14 - r * 13 - cIdx * 2;
+      const rad = Math.max(0.7, 2.1 - (r + cIdx) * 0.35);
+      dot(cx, cy, rad, 0.28 - (r + cIdx) * 0.05);
+    }
+  }
+}
+
+function ornamentWave·방향(L: Layout, kind: "wave" | "lines-diagonal" | "dots", opacity = 1) {
+  if (kind === "dots") ornamentDots(L, opacity);
+  else ornamentLinesDiagonal(L, opacity); // wave + lines-diagonal share the sweeping-line token
 }
 
 function ornamentGrid(L: Layout, y0: number, h: number) {
@@ -857,14 +891,25 @@ export async function renderPdfMeasured(spec: DocumentSpec): Promise<{ buffer: B
     if (c.bg.toUpperCase() !== "FFFFFF") {
       doc.save().fillColor(`#${c.bg}`).rect(0, 0, doc.page.width, doc.page.height).fill().restore();
     }
-    // Ornament on body pages for warm mood only (top-right + bottom-left hairlines)
-    if (resolvedDesign.ornament === "lines-diagonal" && !compact) {
-      const saveY = doc.y;
-      // draw on current page only — reuse helper but inline to avoid Layout dependency before L exists
-      const W = doc.page.width, H = doc.page.height;
-      doc.save().lineWidth(0.5).strokeColor(`#${c.line}`).opacity(0.5);
-      for (let i = 0; i < 5; i++) doc.moveTo(W - 70 + i * 6, 14 + i * 7).lineTo(W - 10, 28 + i * 7).stroke();
-      for (let i = 0; i < 4; i++) doc.moveTo(14, H - 48 + i * 7).lineTo(74, H - 34 + i * 7).stroke();
+    // Decor for all non-formal moods (warm/playful/cool/sage/minimal): sweeping corners like the reference.
+    // Formal (slate/executive/academic reports) stays clean — no ornament. Compact 1-pagers get a whisper.
+    const mood = resolvedDesign.mood;
+    const orn = resolvedDesign.ornament;
+    if (mood === "formal" || mood === "dark") return;
+    if (orn === "none") return;
+    const saveY = doc.y;
+    const W = doc.page.width, H = doc.page.height;
+    const hex = (h: string) => `#${h}`;
+    const L2 = { c, W, H, doc, hex } as unknown as Layout;
+    doc.save();
+    try {
+      if (orn === "dots") ornamentDots(L2, compact ? 0.7 : 1);
+      else if (orn === "wave" || orn === "lines-diagonal") ornamentWave·방향(L2, orn, compact ? 0.6 : 0.85);
+      else if (!compact) {
+        // pill/grid moods: whisper of the wave token so non-formal never feels bare.
+        ornamentWave·방향(L2, "lines-diagonal", 0.45);
+      }
+    } finally {
       doc.restore();
       doc.y = saveY;
     }

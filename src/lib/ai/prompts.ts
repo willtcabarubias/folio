@@ -160,14 +160,23 @@ Section titles must be specific and informative ("Fusion: How the Sun Makes Ener
 School templates above cover common cases, but you are NOT limited to them. When the request names a document type with no template (invoice, business plan, contract, certificate, program, menu, etc.), compose its real-world industry-standard structure from your own knowledge — required sections, in the conventional order, with the natural layout per section (tables for line items, timelines for processes, groups for entries). Stay inside the Layouts vocabulary and the length rules; keep the tone professional. A correct standard format you compose beats a generic essay shape every time.`;
 }
 
-export function expandSystemPrompt(outline: Outline): string {
+export function expandSystemPrompt(outline: Outline, designRef?: { ornament?: string; bulletStyle?: string; themeId?: string; mood?: string }): string {
   const isDeck = outline.format === "pptx";
   const plan = pagePlan(outline);
   const compactType = outline.docType.toLowerCase();
   const isResume = /\b(resume|cv|curriculum)\b/.test(compactType);
   const isLetter = /\bletter\b/.test(compactType);
+  const designLine = designRef
+    ? `Design reference (assist only, never mandate): theme ${designRef.themeId ?? outline.theme}, mood ${designRef.mood ?? "auto"}, ornament ${designRef.ornament ?? "auto"}, bullets ${designRef.bulletStyle ?? "auto"}. Match this curated look; do not invent colors or restyle.`
+    : `Design reference: a deterministic engine applies the curated theme — do not invent colors, fonts, or decoration in content.`;
 
-  return `You are Folio's senior writer and information designer. You turn an approved outline into final, publication-ready content for a ${isDeck ? "slide deck (PPTX)" : outline.format === "docx" ? "Word document (DOCX)" : "PDF document"}. A deterministic design engine applies typography, colors and layout, so you focus on content quality and choosing the right structure for each section.
+  return `You are Folio's senior writer and information designer. You turn an approved outline into final, publication-ready content for a ${isDeck ? "slide deck (PPTX)" : outline.format === "docx" ? "Word document (DOCX)" : "PDF document"}. ${designLine} Focus on content quality and choosing the right structure for each section.
+
+## Source fidelity — highest priority
+- Hierarchy: 1) image vision task ("follow the task from the img") + attached source files verbatim > 2) user transcript answers > 3) outline sections/ids/order/titles. Never invent sections, titles, takeaways, or "putting into practice" blocks.
+- Exactly one block per requested section, same order, same "id", same title wording (fix typos only). If a section id is unclear, use blockFromOutline fallback content — do not create new ids like topup1.
+- When source material is provided, stay faithful to it and prioritise its facts; do not contradict it. Transcribe tables/figures from the image faithfully (headers + rows exact).
+- Do NOT add closing/takeaways/callout/recommendation unless the outline already contains a closing section with that intent. An empty last page is better than an invented takeaway.
 
 Return exactly ONE JSON object: {"blocks":[<Block>, ...]} with exactly one block per requested section, in the same order, reusing the same "id" values.
 
@@ -217,8 +226,16 @@ This ${outline.docType} must fit in ${outline.targetLength} page${outline.target
       } Total words across all content sections (excluding the cover): ${outline.requestedWords ? `exactly ~${outline.requestedWords} (the user asked for ${outline.requestedWords} words — you MUST reach at least 95% of this total)` : `≤ ${plan.wordsTotal}`}. Each section below has its own cap — writing to ${outline.requestedWords ? "95–100%" : "80–95%"} of a cap is required${outline.requestedWords ? "; thin sections will leave the document short of the requested word count, so write full developed paragraphs in every section" : ""}; exceeding a cap gets content cut by the layout engine. ${outline.requestedWords ? "Depth over brevity: every section must pull its weight toward the total." : "Prefer fewer, stronger points over filler."}
 
 ## Rules for documents
-- Write it as a real ${outline.docType} would read — complete, specific, well-formed. "paragraph" sections contain ${plan.compact ? "one tight paragraph" : "1–3 developed paragraphs"} within the cap. Use "bullets" for genuine lists, "groups" for entries that need their own heading (roles, degrees, projects, findings), "timeline" for processes or chronologies, "stats" for key figures, "table" for structured data (≤ 6 columns), "comparison" for side-by-side analysis, "quote" for a notable statement.
+- Write it as a real ${outline.docType} would read — complete, specific, well-formed. "paragraph" sections contain ${plan.compact ? "one tight paragraph" : "1–3 developed paragraphs"} within the cap.
+- Smart layout choice (be creative, avoid bullet walls — bullets are a last resort, never two bullet sections in a row when another shape fits):
+  · rows × columns of facts (e.g. Form of Revelation | Major Figures | Response — like the divine-revelation reference) → "table" (≤ 6 cols, header ≤ 4 words, cell ≤ 8 words, grey header + horizontal rules in render).
+  · process / chronology / journey / procedure → "timeline" (3–5 steps, label ≤ 6 words).
+  · A-vs-B or pros/cons → "comparison" (exactly 2 cols); 2–3 pillars/pairs → "two-column" (2 cols A/B, 3 cols pillars, heading 1–3 words caps + 2–3 bullets each).
+  · headline figures → "stats" (2–4 items, value ≤ 10 chars); entries needing own heading+meta (roles, degrees, findings, cases) → "groups"; striking statement → "quote" (≤ 28 words + attribution).
+  · narrative/prose → "paragraph". Use "bullets" only for genuine lists (3–5 items, 8–18 words, parallel).
 - Any layout may also include a short "body" paragraph before the structured content so sections have context — but count it against the cap.
+- closing: render ONLY if the outline requested a closing section. Then 1–2 conclusion paragraphs in body, no auto callout/takeaway/recommendation. If no closing was requested, end on the last content section.
+- callout: omit unless the outline point explicitly asks for a highlighted insight. Never auto-generate "Key takeaway / In focus / Putting it into practice" cards.
 ${
   plan.compact
     ? `- Compact document: the cover block has title + subtitle + bullets (≤ 4 short header items, ≤ 6 words each) and NO body. Headings ≤ 4 words. Bullets ≤ 18 words. No callouts unless essential. No quotes.`
@@ -235,8 +252,8 @@ ${
 ## General
 - Language: ${outline.language}. Tone: ${outline.tone ?? "professional"}. Audience: ${outline.audience ?? "general"}. Purpose: ${outline.purpose ?? "n/a"}.
 - Be concrete: examples, numbers, names, dates, mechanisms. Never leave placeholders such as "[insert]" or "TBD". Never invent citations, study names or precise statistics you are not confident about; prefer well-known facts or qualitative wording.
-- When source material is provided, stay faithful to it and prioritise its facts; do not contradict it.
 - Do not repeat the same point across sections. Do not include markdown syntax (no #, *, **) inside strings.
+- Layout diversity: never emit three content sections in a row with the same layout when another shape fits — vary table/timeline/two-column/groups/stats/quote/paragraph.
 - Return ONLY the JSON object.`;
 }
 
@@ -254,6 +271,7 @@ export function outlineToPromptText(outline: Outline, sections: OutlineSection[]
     `Language: ${outline.language}`,
     `Target length: ${outline.targetLength} ${isDeck ? "slides" : "pages"} (total sections in the whole document: ${outline.sections.length})`,
     !isDeck && outline.requestedWords ? `Strict word target: ~${outline.requestedWords} words total across content sections` : null,
+    `Rule: follow ONLY these sections — same ids, titles, order. No new sections, no takeaways, no "putting into practice". If an image/source was provided, transcribe its task exactly.`,
   ]
     .filter(Boolean)
     .join("\n");

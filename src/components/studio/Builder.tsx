@@ -329,20 +329,34 @@ export function Builder({ id }: { id: string }) {
         attachments: allReadyAttachments.map((a) => ({ name: a.name, text: a.text, ...(a.dataUrl ? { dataUrl: a.dataUrl, mimeType: a.mimeType, isImage: true } : {}) })),
       })) {
         if (evt.type === "block") {
+          // Bulletproof streaming: key by id in a Map, never store undefined holes.
+          // Out-of-order or duplicate events can't crash EditablePreview.
+          const incoming = evt.block as DocumentSpec["blocks"][number];
+          if (!incoming || typeof incoming.id !== "string" || !incoming.id) return;
+          // Sanitize minimal shape (writer may omit bullets/title).
+          const safe = {
+            ...incoming,
+            title: typeof incoming.title === "string" && incoming.title.trim() ? incoming.title : "Untitled",
+            bullets: Array.isArray(incoming.bullets) ? incoming.bullets : [],
+          } as DocumentSpec["blocks"][number];
           setSpec((prev) => {
             const base = prev ?? skeleton;
-            const blocks = [...base.blocks];
-            // place block at its outline index to keep order
-            const idx = typeof evt.index === "number" && evt.index >= 0 ? evt.index : blocks.length;
-            // ensure array length
-            while (blocks.length <= idx) blocks.push(undefined as unknown as typeof blocks[0]);
-            blocks[idx] = evt.block as typeof blocks[0];
-            const ordered = target.sections
-              .map((s) => blocks.find((b) => b && b.id === s.id))
-              .filter(Boolean) as typeof blocks;
-            // if some blocks not yet arrived, show what we have in received order without gaps
-            const visible = ordered.length ? ordered : blocks.filter(Boolean) as typeof blocks;
-            return { ...base, blocks: visible } as DocumentSpec;
+            const byId = new Map<string, DocumentSpec["blocks"][number]>();
+            for (const b of base.blocks) {
+              if (b && typeof b.id === "string" && b.id) byId.set(b.id, b);
+            }
+            byId.set(safe.id, safe);
+            // Preserve outline order; append unknown ids (e.g. topup) at end.
+            const ordered: DocumentSpec["blocks"][number][] = [];
+            for (const s of target.sections) {
+              const hit = byId.get(s.id);
+              if (hit) {
+                ordered.push(hit);
+                byId.delete(s.id);
+              }
+            }
+            for (const rest of byId.values()) ordered.push(rest);
+            return { ...base, blocks: ordered } as DocumentSpec;
           });
         } else if (evt.type === "done") {
           finalSpec = evt.spec;
@@ -543,11 +557,26 @@ export function Builder({ id }: { id: string }) {
     }
     const s = currentSpec();
     if (!s || exporting) return;
+    // Preflight: non-Latin scripts can't PDF directly — guide to DOCX early (no wasted render).
+    // Keep light: only check title+headings client-side; server does full ratio check.
+    if (kind === "pdf") {
+      const sample = [s.title, ...(s.blocks.slice(0, 3).map((b) => b.title ?? ""))].join(" ");
+      const nonLatin = (sample.match(/[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\u0600-\u06FF]/g) ?? []).length;
+      if (nonLatin >= 3) {
+        showToast("This language exports best as DOCX — rendering PDF may drop characters");
+      }
+    }
     setExporting(kind);
     try {
-      const { blob, fileName } = await renderFile(s, kind);
+      const { blob, fileName, convertedFrom, warnings } = await renderFile(s, kind);
       downloadBlob(blob, fileName);
-      showToast("Export ready");
+      if (convertedFrom) {
+        showToast(`Export ready (converted ${convertedFrom.replace("from-", "").toUpperCase()} → ${kind.toUpperCase()} — check layout)`);
+      } else if (warnings) {
+        showToast(`Export ready — ${warnings.split(" | ")[0].slice(0, 90)}`);
+      } else {
+        showToast("Export ready");
+      }
     } catch (err) {
       reportApiError(err, "Export failed", "api:render");
       showToast(err instanceof Error ? err.message : "Export failed");

@@ -3,6 +3,7 @@ import { AIError, MISSING_KEY_MESSAGE, generateStructured, isConfigured, type Ch
 import { attachmentsToPromptText, expandSystemPrompt, outlineToPromptText } from "@/lib/ai/prompts";
 import { fitToPages } from "@/lib/render/fit";
 import { blockFromOutlineSection, designPass, normalizeBlock, normalizeOutline, pagePlan, specWordCount } from "@/lib/spec/normalize";
+import { validateSpecForExport } from "@/lib/validate";
 import { ExpandResponseSchema, OutlineSchema, type Block, type ExpandRequest, type Outline, type OutlineSection } from "@/lib/spec/types";
 
 export const runtime = "nodejs";
@@ -29,7 +30,26 @@ export async function POST(req: Request) {
   const attachments = (body.attachments ?? []).filter((a) => a && ((a as any).isImage || a.text?.trim())).slice(0, 8);
   const transcript = (body.transcript ?? []).filter((t) => t && typeof t.content === "string").slice(-10);
 
-  const system = expandSystemPrompt(outline);
+  // Design reference assist: resolve once, pass tokens to writer (never mandate restyle).
+  let designRef: { ornament?: string; bulletStyle?: string; themeId?: string; mood?: string } | undefined;
+  try {
+    const { resolveDesign } = await import("@/lib/design/resolver");
+    const r = resolveDesign({
+      docType: outline.docType,
+      tone: outline.tone,
+      audience: outline.audience,
+      targetPages: outline.format === "pptx" ? undefined : outline.targetLength,
+      compact: outline.format !== "pptx",
+      preferredTheme: outline.theme as never,
+      format: outline.format,
+    });
+    const { getTheme } = await import("@/lib/spec/themes");
+    const t = getTheme(r.themeId);
+    designRef = { ornament: t.ornament, bulletStyle: t.bulletStyle, themeId: r.themeId, mood: r.mood };
+  } catch {
+    designRef = undefined;
+  }
+  const system = expandSystemPrompt(outline, designRef);
   const contextParts: string[] = [];
   const brief = transcript
     .filter((t) => t.role === "user")
@@ -87,6 +107,12 @@ export async function POST(req: Request) {
           }
           let spec = designPass(outline, finalBlocks, outline.format);
           if (outline.format !== "pptx") spec = await fitToPages(spec);
+          // Hybrid QA: deterministic validate-style checks appended as warnings (never block).
+          try {
+            failures.push(...validateSpecForExport(spec, outline).slice(0, 4));
+          } catch {
+            // QA must never break generation.
+          }
           send({ type: "done", spec, warnings: failures, fit: spec.fit ?? null });
         } catch (err) {
           const message = err instanceof Error ? err.message : "Unexpected error";
@@ -132,6 +158,11 @@ export async function POST(req: Request) {
     }
     let spec = designPass(outline, blocks, outline.format);
     if (outline.format !== "pptx") spec = await fitToPages(spec);
+    try {
+      failures.push(...validateSpecForExport(spec, outline).slice(0, 4));
+    } catch {
+      // QA must never break generation.
+    }
     return NextResponse.json({ spec, warnings: failures, fit: spec.fit ?? null });
   } catch (err) {
     const status = err instanceof AIError ? err.status : 500;
@@ -151,10 +182,12 @@ export async function POST(req: Request) {
 const NO_TOPUP_RE = /\b(invoice|receipt|cover letter|letter|resume|cv|quiz|worksheet|certificate|checklist|agenda|memo)\b/i;
 
 /**
- * Fill-priority top-up (ruling B): when the writer under-produces (<90% of the
- * word budget), add ONE "Key Details" batch before the closing instead of
- * shipping a document with a half-empty last page. Bounded: single call,
- * max 2 blocks, skipped for decks, sparse forms, and 12+ content sections.
+ * Expand-in-place (no forced takeaways): when the writer under-produces (<90% of the
+ * word budget), deepen the thinnest existing content blocks instead of inventing
+ * new "Key Details / Putting It Into Practice" sections. Never creates new titles —
+ * user prompt + outline + source material are the only structure source.
+ * Bounded: single call, max 2 blocks rewritten, skipped for decks, sparse forms,
+ * and 12+ content sections. Returns warning when still short (ship short, don't fill).
  */
 async function topUpIfShort(
   system: string,
@@ -170,32 +203,51 @@ async function topUpIfShort(
   const contentCount = blocks.filter((b) => b.layout !== "cover" && b.layout !== "agenda").length;
   if (words >= budget * 0.9 || contentCount >= 12) return { blocks, toppedUp: false };
   const deficit = Math.max(60, Math.round(budget - words));
-  const titles = blocks.map((b) => b.title).filter(Boolean).join(" | ").slice(0, 600);
-  const wantTwo = deficit > 400;
+  // Pick the 1-2 thinnest content blocks (excluding cover/closing/quiz) to deepen.
+  const candidates = blocks
+    .filter((b) => b.layout !== "cover" && b.layout !== "closing" && b.layout !== "agenda" && b.layout !== "quiz")
+    .sort((a, b) => {
+      const wa = specWordCount({ blocks: [a] } as unknown as Parameters<typeof specWordCount>[0]);
+      const wb = specWordCount({ blocks: [b] } as unknown as Parameters<typeof specWordCount>[0]);
+      return wa - wb;
+    })
+    .slice(0, deficit > 400 ? 2 : 1);
+  if (!candidates.length) {
+    return { blocks, toppedUp: false, warning: `Document is ~${deficit} words short of budget — add detail to existing sections rather than new ones.` };
+  }
   try {
+    const brief = candidates
+      .map((c) => `[id=${c.id}] [layout=${c.layout}] ${c.title}`)
+      .join("\n");
     const result = await generateStructured({
       schema: ExpandResponseSchema,
       system,
       messages: [
         {
           role: "user",
-          content: `${context ? `${context}\n\n---\n` : ""}Title: ${outline.title}\nLanguage: ${outline.language}\nExisting sections (do NOT repeat these): ${titles}\n\nThe document is about ${deficit} words short of its ${budget}-word budget and the last page would be half empty. Write ${wantTwo ? "TWO" : "ONE"} additional substantive block(s) that add genuinely new detail for "${outline.title}" (concrete examples, implications, practical next steps for a student reader). First block: id "topup1", title "Key Details & Takeaways", layout "bullets" with 4-5 bullets of 12-18 words each.${wantTwo ? ' Second block: id "topup2", title "Putting It Into Practice", layout "paragraph" with one tight paragraph.' : ""} Together they must total ~${deficit} words. Return ONLY {"blocks":[...]}.`,
+          content: `${context ? `${context}\n\n---\n` : ""}Title: ${outline.title}\nLanguage: ${outline.language}\n\nThe document is about ${deficit} words short of its ${budget}-word budget. Do NOT create new sections, titles, takeaways, or "putting into practice" blocks. Instead, rewrite ONLY these existing blocks with deeper substance (concrete examples, mechanisms, numbers from source material where available), keeping the SAME id, title, and layout for each:\n${brief}\n\nReturn ONLY {"blocks":[...]} with exactly ${candidates.length} block(s), same ids/titles/layouts, expanded bodies/bullets to cover ~${deficit} more words total. Stay faithful to source material; do not repeat points across blocks.`,
         },
       ],
       maxTokens: 4000,
       temperature: 0.55,
-      label: "Writer-topup",
+      label: "Writer-expand-in-place",
     });
-    const fresh = result.blocks.slice(0, 2).map((raw, i) => {
-      const id = `topup${i + 1}`;
-      return normalizeBlock({ ...raw, id }, id, outline.format, undefined);
-    });
-    if (!fresh.length) return { blocks, toppedUp: false };
-    const out = [...blocks];
-    const closingIdx = out.findIndex((b) => b.layout === "closing");
-    if (closingIdx >= 0) out.splice(closingIdx, 0, ...fresh);
-    else out.push(...fresh);
-    return { blocks: out, toppedUp: true, warning: `Added a Key Details section (${deficit} words) to fill the pages.` };
+    const byId = new Map(blocks.map((b) => [b.id, b]));
+    let replaced = 0;
+    for (const raw of result.blocks.slice(0, 2)) {
+      const id = String((raw as { id?: unknown }).id ?? "");
+      if (!id || !byId.has(id)) continue; // strict: unknown ids rejected, never appended
+      const prev = byId.get(id)!;
+      const hint = outline.sections.find((s) => s.id === id);
+      const next = normalizeBlock({ ...raw, id, title: prev.title, layout: prev.layout }, id, outline.format, hint);
+      // Preserve structural intent: never flip a block into closing/quiz/takeup.
+      if (next.layout === "closing" && prev.layout !== "closing") next.layout = prev.layout;
+      byId.set(id, { ...next, id, title: prev.title });
+      replaced++;
+    }
+    if (!replaced) return { blocks, toppedUp: false };
+    const out = blocks.map((b) => byId.get(b.id) ?? b);
+    return { blocks: out, toppedUp: true, warning: `Deepened ${replaced} existing section(s) (~${deficit} words). No new sections added.` };
   } catch {
     return { blocks, toppedUp: false };
   }
@@ -213,13 +265,13 @@ async function expandBatch(system: string, context: string, outline: Outline, se
     label: "Writer",
   });
 
-  // Align returned blocks to the requested sections by id, then by order.
+  // Strict alignment: unknown ids are rejected (never appended as takeaways).
+  // Falls back to outline content so structure always matches user request.
   const byId = new Map<string, (typeof result.blocks)[number]>();
   for (const b of result.blocks) if (b.id) byId.set(String(b.id), b);
-  const unused = result.blocks.filter((b) => !b.id || !sections.some((s) => s.id === String(b.id)));
 
   return sections.map((section) => {
-    const raw = byId.get(section.id) ?? unused.shift();
+    const raw = byId.get(section.id);
     if (!raw) return blockFromOutlineSection(section, outline);
     const block = normalizeBlock({ ...raw, id: section.id }, section.id, outline.format, section);
     // Cover/closing intent from the outline always wins.

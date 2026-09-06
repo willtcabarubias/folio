@@ -320,7 +320,7 @@ export const THEMES: Record<ThemeId, Theme> = {
 
 export function getTheme(id: string | undefined | null): Theme {
   if (id && id in THEMES) return THEMES[id as ThemeId];
-  return THEMES.azure;
+  return THEMES.mono;
 }
 
 export const THEME_LIST = Object.values(THEMES);

@@ -250,6 +250,22 @@ export async function POST(req: Request) {
   }
 
   try {
+    // Bulletproof: cap extra LLM calls to stay under Vercel/Hobby timeouts.
+    // Planner (1) + max 2 repairs. Previously up to 5 sequential calls could 504.
+    let extraCalls = 0;
+    const canRetry = () => extraCalls < 2;
+    const doRetry = async (messages: ChatMessage[], label: string) => {
+      extraCalls++;
+      return generateStructured({
+        schema: AgentResponseSchema,
+        system,
+        messages,
+        maxTokens: 6000,
+        temperature: 0.4,
+        label,
+      });
+    };
+
     let result = await generateStructured({
       schema: AgentResponseSchema,
       system,
@@ -261,31 +277,26 @@ export async function POST(req: Request) {
 
     // Hard guarantee: no endless questioning.
     if (result.kind === "clarify" && clarifyRounds >= MAX_CLARIFY_ROUNDS) {
-      result = await generateStructured({
-        schema: AgentResponseSchema,
-        system,
-        messages: [...convo, { role: "user", content: "Do not ask more questions. Produce the outline now with sensible defaults." }],
-        maxTokens: 6000,
-        temperature: 0.4,
-        label: "Planner",
-      });
+      result = await doRetry(
+        [...convo, { role: "user", content: "Do not ask more questions. Produce the outline now with sensible defaults." }],
+        "Planner",
+      );
     }
 
     // Guard: vague file tasks must not be answered inline — force clarify with stepper UI.
     // Business rule: we are a document generator, not ChatGPT — "explain this" with a file must become a document, not an inline chat answer.
+    // Tightened: require explicit file-task phrasing to avoid over-matching generic "help".
     const lastUserRaw = messages[messages.length - 1]?.content ?? "";
     const isVagueFileTask =
       attachments.length > 0 &&
-      /summar|summry|explain|describe|what.*is.*this|what.*does.*this|what.*say|tell.*about|identify|what.*wrong|what.*issue|critique|review this|extract|find.*(wrong|issue|error|problem)|\b(hi|hello|hey|help|make|do|fix)\b.{0,40}\b(this|that|it)\b|\bhelp with\b|\bmake something\b|\bpl[sz]?\s+make\b/i.test(lastUserRaw);
+      /summar|summry|explain\s+(this|that|it|the)|describe\s+(this|that|it)|what.*(is|does|say).*this|tell.*about (this|that|it)|identify.*(wrong|issue)|what.*wrong|what.*issue|critique|review this|extract|find.*(wrong|issue|error|problem)|\bmake\s+something\b|\bpl[sz]?\s+make\b/i.test(lastUserRaw);
     const isGenericExplainReply =
       attachments.length > 0 &&
       result.kind === "reply" &&
       /happy to help|what would you like me to explain|let me know.*explain|paste the content here/i.test((result as { message: string }).message ?? "");
-    if ((result.kind === "reply" && isVagueFileTask) || isGenericExplainReply) {
-      result = await generateStructured({
-        schema: AgentResponseSchema,
-        system,
-        messages: [
+    if (canRetry() && ((result.kind === "reply" && isVagueFileTask) || isGenericExplainReply)) {
+      result = await doRetry(
+        [
           ...convo,
           {
             role: "user",
@@ -293,10 +304,8 @@ export async function POST(req: Request) {
               "Your last answer was an inline reply, but the user attached a file and asked a vague file task (summarize / explain this / describe what this is / identify what's wrong / critique / review). You MUST return kind \"clarify\" with 1-2 questions (Q1 focus: Whole document | Key concepts | Section breakdown | Actionable takeaways [ui hybrid, placeholder \"e.g., key concepts\"], Q2 format: Explainer 2-4 pages PDF [Rec] | Study guide | Slide deck [ui radio]) and do NOT explain the file inline. We are a document generator — convert the request into a file. Keep questions few when task is clear.",
           },
         ],
-        maxTokens: 6000,
-        temperature: 0.4,
-        label: "Planner-retry-file-task",
-      });
+        "Planner-retry-file-task",
+      );
     }
 
     // Mixed request (content + theme tweak): content flows normally, but the model
@@ -317,37 +326,36 @@ export async function POST(req: Request) {
       (confidence.missingFormat ||
         confidence.missingLength ||
         (confidence.score < CONFIDENCE_THRESHOLD && confidence.topicCount < 3 && !confidence.focusAnswered));
-    if (mustClarify && result.kind === "outline") {
+    if (canRetry() && mustClarify && result.kind === "outline") {
       const need: string[] = [];
       if (confidence.score < CONFIDENCE_THRESHOLD && confidence.topicCount < 3 && !confidence.focusAnswered)
         need.push(`understanding is only ${confidence.score}/100 with a thin topic`);
       if (confidence.missingFormat) need.push("format not stated");
       if (confidence.missingLength) need.push("length not stated");
-      result = await generateStructured({
-        schema: AgentResponseSchema,
-        system,
-        messages: [
+      result = await doRetry(
+        [
           ...convo,
           {
             role: "user",
             content: `Do NOT produce an outline yet (${need.join("; ")}). Return kind "clarify" in ONE single turn: substantive focus question(s) first (hybrid with write-your-own placeholder), then the missing format question (second-last) and/or length question (absolute last) as needed, max 4 total. JSON only.`,
           },
         ],
-        maxTokens: 6000,
-        temperature: 0.4,
-        label: "Planner-force-clarify",
-      });
+        "Planner-force-clarify",
+      );
     }
     let response = finalize(result, body.preferredFormat, parsedWords, template, askedAnswered, lastUserRaw);
     // Suppression consumed every question: the model only repeated answered
     // dimensions. Force the outline (bounded, same pattern as the MAX path) —
     // never stall on the "tell me more" reply fallback.
-    if (result.kind === "clarify" && response.kind === "reply" && askedAnswered &&
-      (askedAnswered.answeredFormat || askedAnswered.answeredLength || askedAnswered.answeredNormQ.size > 0)) {
-      result = await generateStructured({
-        schema: AgentResponseSchema,
-        system,
-        messages: [
+    if (
+      canRetry() &&
+      result.kind === "clarify" &&
+      response.kind === "reply" &&
+      askedAnswered &&
+      (askedAnswered.answeredFormat || askedAnswered.answeredLength || askedAnswered.answeredNormQ.size > 0)
+    ) {
+      result = await doRetry(
+        [
           ...convo,
           {
             role: "user",
@@ -355,23 +363,20 @@ export async function POST(req: Request) {
               "All needed answers were already given (see My answers in history). Do not ask more questions. Produce the outline now with sensible defaults, honoring the answered format and length.",
           },
         ],
-        maxTokens: 6000,
-        temperature: 0.4,
-        label: "Planner-suppression-empty",
-      });
+        "Planner-suppression-empty",
+      );
       response = finalize(result, body.preferredFormat, parsedWords, template, null, lastUserRaw);
     }
     if (themeIntent && contentIntent && response.kind === "outline") {
       response = { ...response, message: `${response.message} (Note: background/theme changes aren't supported yet — content updates applied.)` };
     }
     // Cover-only guard: retry once instead of silently returning a header-only doc.
-    if (response.kind === "outline" && response.outline.lengthSource === "user" && response.outline.targetLength >= 2) {
+    // Respects retry budget; if budget exhausted, pad deterministically via normalize (no generic filler).
+    if (canRetry() && response.kind === "outline" && response.outline.lengthSource === "user" && response.outline.targetLength >= 2) {
       const contentSections = response.outline.sections.filter((s) => s.layout !== "cover" && s.layout !== "agenda").length;
       if (contentSections === 0) {
-        const retry = await generateStructured({
-          schema: AgentResponseSchema,
-          system,
-          messages: [
+        const retry = await doRetry(
+          [
             ...convo,
             { role: "assistant", content: JSON.stringify(result).slice(0, 12000) },
             {
@@ -379,10 +384,8 @@ export async function POST(req: Request) {
               content: `Your outline has only a cover and no content sections, but the user explicitly asked for ${response.outline.requestedWords ? `${response.outline.requestedWords} words (${response.outline.targetLength} pages)` : `${response.outline.targetLength} ${response.outline.format === "pptx" ? "slides" : "pages"}`}. Return the FULL corrected outline JSON now with at least ${Math.max(4, Math.min(response.outline.targetLength * 2, 7))} sections (cover first, then content sections, then closing where the type calls for it), keeping the same title/format. No commentary, JSON only.`,
             },
           ],
-          maxTokens: 6000,
-          temperature: 0.3,
-          label: "Planner-repair-cover-only",
-        });
+          "Planner-repair-cover-only",
+        );
         response = finalize(retry, body.preferredFormat, parsedWords, template, askedAnswered, lastUserRaw);
       }
     }

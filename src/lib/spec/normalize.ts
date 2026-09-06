@@ -1,5 +1,6 @@
 import type { Block, DocumentSpec, Format, Layout, LengthSource, Outline, OutlineSection } from "./types";
 import { DEFAULT_THEME, LAYOUTS } from "./types";
+import { resolveDesign } from "@/lib/design/resolver";
 
 /* ------------------------------------------------------------------ */
 /*  Text hygiene                                                        */
@@ -32,11 +33,83 @@ export function cleanBullet(input: unknown, maxChars = 220): string {
   return s;
 }
 
+/** Detect generic filler sections the normalizer may have added to hit a length target.
+ *  Used by validate-style QA (pptx skill pattern): flag before export, never ship silently. */
+export function isFillerSection(title: string, points: string[]): boolean {
+  const t = (title || "").trim().toLowerCase();
+  if (/^(section|key aspect)\s*\d*/i.test(title || "")) return true;
+  if (/^key point for .+ — part \d+/i.test(points[0] ?? "")) return true;
+  if (/^explain this aspect of /i.test(points[0] ?? "")) return true;
+  if (t === "section" || t.startsWith("section ")) return true;
+  return false;
+}
+
+/** Outline quality check: counts filler, cover-only, empty-point sections. */
+export function validateOutlineQuality(sections: { title: string; layout: string; points: string[] }[]): {
+  filler: number;
+  empty: number;
+  contentSections: number;
+  ok: boolean;
+} {
+  let filler = 0;
+  let empty = 0;
+  let contentSections = 0;
+  for (const s of sections) {
+    if (s.layout === "cover" || s.layout === "agenda") continue;
+    contentSections++;
+    if (isFillerSection(s.title, s.points)) filler++;
+    else if (!s.points.length && (s.layout === "bullets" || s.layout === "paragraph")) empty++;
+  }
+  return { filler, empty, contentSections, ok: filler === 0 && contentSections > 0 };
+}
+
+/** Build a contextual filler section from real outline context — never generic "Section N".
+ *  Derives angle from neighboring section titles + docType so writer has something concrete. */
+function contextualFiller(
+  topic: string,
+  docType: string,
+  siblings: { title: string; layout: string }[],
+  index: number,
+): { title: string; layout: Layout; points: string[] } {
+  const angles = [
+    `Key insights on ${topic}`,
+    `Practical applications of ${topic}`,
+    `Challenges and considerations for ${topic}`,
+    `Next steps with ${topic}`,
+    `Real-world examples of ${topic}`,
+    `Deep dive: ${topic} in practice`,
+  ];
+  const existing = new Set(siblings.map((s) => s.title.toLowerCase()));
+  let title = angles[index % angles.length].slice(0, 80);
+  let k = 2;
+  while (existing.has(title.toLowerCase())) title = `${angles[index % angles.length]} (${k++})`.slice(0, 80);
+  // Vary layout so decks don't become a wall of bullets (mirrors expand repair).
+  const layout: Layout = index % 3 === 1 ? "two-column" : index % 3 === 2 ? "timeline" : "bullets";
+  if (/quiz|worksheet|exam|invoice|receipt|resume|letter|memo|checklist/i.test(docType)) {
+    return {
+      title,
+      layout: "bullets",
+      points: [`Core detail for ${topic}`, `Concrete example`, `What to remember`],
+    };
+  }
+  if (layout === "two-column") {
+    return { title, layout, points: [`Compare approaches to ${topic}`, `When each works best`, `Recommendation`] };
+  }
+  if (layout === "timeline") {
+    return { title, layout, points: [`First step with ${topic}`, `Then apply and refine`, `Review outcomes`] };
+  }
+  return {
+    title,
+    layout: "bullets",
+    points: [`Why ${topic} matters here`, `Concrete example or case`, `Implication for the reader`],
+  };
+}
+
+/** Keep headline figures short without cutting mid-word. */
 export function slugId(prefix: string, i: number): string {
   return `${prefix}${i + 1}`;
 }
 
-/** Keep headline figures short without cutting mid-word. */
 export function shortValue(input: string, max = 22): string {
   const s = input.trim();
   if (s.length <= max) return s;
@@ -279,7 +352,8 @@ export function normalizeOutline(raw: RawOutline): Outline {
 
   const docType = cleanText(raw.docType) || (isDeck ? "presentation" : "document");
 
-  // Closing: decks always end with one; documents only when the type calls for it.
+  // Closing: decks keep a mirror end shell (title mirrors outline, never forced takeaways);
+  // documents keep closing ONLY if the planner/user explicitly included one.
   const closingIdxs = sections.map((s, i) => (s.layout === "closing" ? i : -1)).filter((i) => i >= 0);
   if (closingIdxs.length) {
     const keep = closingIdxs[closingIdxs.length - 1];
@@ -287,13 +361,18 @@ export function normalizeOutline(raw: RawOutline): Outline {
     sections = sections.filter((_, i) => i !== keep).map((s) => (s.layout === "closing" ? { ...s, layout: "bullets" as Layout } : s));
     if (!isDeck && NO_CONCLUSION.test(normalizeDocType(docType)) && /^(conclusion|summary|closing)$/i.test(closing.title)) {
       // A bogus "Conclusion" on a resume/letter/memo: drop it.
+    } else if (!isDeck && /^(key takeaways|key details.*takeaways?|putting it into practice)\s*:?$/i.test(closing.title)) {
+      // Writer-invented takeaways without user request: drop for docs (expand-in-place covers budget).
     } else {
       sections.push(closing);
     }
   } else if (isDeck) {
     const last = sections[sections.length - 1];
     if (/^(conclusion|summary|key takeaways|thank you|next steps|closing|wrap[- ]?up)/i.test(last.title)) last.layout = "closing";
-    else sections.push({ id: uniqueId("closing", seen), title: "Key Takeaways", layout: "closing", points: [] });
+    else {
+      // Mirror shell uses the document title — never a forced "Key Takeaways".
+      sections.push({ id: uniqueId("closing", seen), title: cleanText(raw.title) || last.title, layout: "closing", points: [] });
+    }
   }
 
   // Documents get an automatic contents page when long enough; drop explicit agenda sections.
@@ -308,20 +387,17 @@ export function normalizeOutline(raw: RawOutline): Outline {
   if (isDeck) {
     if (lengthSource === "user" && requestedRaw) {
       targetLength = requestedRaw;
-      // Enforce exact slide count: pad or trim sections to match explicit user request
+      // Enforce exact slide count: pad with contextual sections (never generic "Section N")
+      // or trim middle while preserving cover/closing.
       if (sections.length < targetLength) {
         const need = targetLength - sections.length;
         const hasClosing = sections[sections.length - 1]?.layout === "closing";
         const insertAt = hasClosing ? sections.length - 1 : sections.length;
+        const topic = cleanText(raw.title) || "topic";
         for (let i = 0; i < need; i++) {
-          const n = sections.length + 1;
-          const fillerId = uniqueId(`s${n}`, seen);
-          sections.splice(insertAt + i, 0, {
-            id: fillerId,
-            title: `Section ${n}`,
-            layout: "bullets",
-            points: [`Key point for ${cleanText(raw.title) || "topic"} — part ${n}`],
-          });
+          const filler = contextualFiller(topic, docType, sections, i);
+          const fillerId = uniqueId(`s_ctx${i + 1}`, seen);
+          sections.splice(insertAt + i, 0, { id: fillerId, ...filler });
         }
       } else if (sections.length > targetLength) {
         const cover = sections[0]?.layout === "cover" ? [sections[0]] : [];
@@ -329,9 +405,13 @@ export function normalizeOutline(raw: RawOutline): Outline {
         const middle = sections.filter((_, i) => !(cover.length && i === 0) && !(closing.length && i === sections.length - 1));
         const keepMiddle = Math.max(0, targetLength - cover.length - closing.length);
         sections = [...cover, ...middle.slice(0, keepMiddle), ...closing];
+        // If trimming left us short (e.g. cover+closing only), pad contextually — never empty.
+        const topic2 = cleanText(raw.title) || "topic";
+        let padIdx = 0;
         while (sections.length < targetLength) {
-          const fid = uniqueId(`s${sections.length + 1}`, seen);
-          sections.splice(sections.length - (closing.length ? 1 : 0), 0, { id: fid, title: `Section ${sections.length + 1}`, layout: "bullets", points: [] });
+          const filler = contextualFiller(topic2, docType, sections, padIdx++);
+          const fid = uniqueId(`s_ctxpad${padIdx}`, seen);
+          sections.splice(sections.length - (closing.length ? 1 : 0), 0, { id: fid, ...filler });
         }
       }
     } else {
@@ -348,8 +428,8 @@ export function normalizeOutline(raw: RawOutline): Outline {
       else targetLength = requestedRaw ?? DEFAULT_LENGTH[format];
     }
     // Enforce minimum section count for explicit doc lengths — a 1-section
-    // (cover-only) outline can never satisfy a 2+ page request. Pad content
-    // sections so the writer has something to expand (mirrors deck logic).
+    // (cover-only) outline can never satisfy a 2+ page request. Pad with
+    // contextual sections so the writer has concrete angles (no generic filler).
     if (lengthSource === "user" && targetLength >= 2) {
       const desiredMin = targetLength <= 1 ? 3 : targetLength === 2 ? 5 : Math.min(targetLength * 2, 9);
       if (sections.length < desiredMin) {
@@ -358,14 +438,10 @@ export function normalizeOutline(raw: RawOutline): Outline {
         const topic = cleanText(raw.title) || "topic";
         let n = 0;
         while (sections.length < desiredMin) {
+          const filler = contextualFiller(topic, docType, sections, n);
+          const fillerId = uniqueId(`s_pad${n + 1}`, seen);
+          sections.splice(insertAt + n, 0, { id: fillerId, ...filler });
           n++;
-          const fillerId = uniqueId(`s_pad${n}`, seen);
-          sections.splice(insertAt + n - 1, 0, {
-            id: fillerId,
-            title: `Key aspect ${sections.length} of ${topic}`.slice(0, 80),
-            layout: "paragraph",
-            points: [`Explain this aspect of ${topic} in depth`, `Give a concrete business example`, `Why it matters for jobs and careers`],
-          });
         }
       }
     }
@@ -621,6 +697,24 @@ export function designPass(outline: Outline, blocks: Block[], format: Format): D
   const targetPages = isDeck ? undefined : Math.max(1, outline.targetLength);
   // Docs: always compact (no dedicated cover page), decks keep cover
   const compact = isDeck ? false : true;
+  // Hybrid architecture: resolve theme ONCE here (single source of truth).
+  // Renderers must honor spec.theme as-is; "mono" means auto and is resolved here,
+  // so pdf/docx/slides can no longer drift to different themes.
+  let resolvedTheme = outline.theme;
+  try {
+    const r = resolveDesign({
+      docType: outline.docType,
+      tone: outline.tone,
+      audience: outline.audience,
+      targetPages: targetPages ?? undefined,
+      compact,
+      preferredTheme: outline.theme as never,
+      format,
+    });
+    resolvedTheme = r.themeId as typeof resolvedTheme;
+  } catch {
+    // If resolver unavailable (tests), keep outline theme.
+  }
   let out: Block[] = [];
   for (const b of blocks) out.push(...(isDeck ? splitForSlides(b) : [b]));
 
@@ -634,6 +728,19 @@ export function designPass(outline: Outline, blocks: Block[], format: Format): D
   const middle = rest.filter((b) => b.layout !== "closing");
   for (const extra of closings.slice(0, -1)) middle.push({ ...extra, layout: extra.bullets.length ? "bullets" : "paragraph" });
   let closing: Block | undefined = closings[closings.length - 1];
+  // Docs: keep closing ONLY when the outline explicitly requested one.
+  // Writer-invented "Key Takeaways / Putting It Into Practice" is stripped as framing:
+  // substantive content is demoted to bullets (preserved), empty framing is dropped.
+  if (!isDeck && closing) {
+    const outlineHasClosing = outline.sections.some((s) => s.layout === "closing");
+    const looksInvented = /^(key takeaways|key details.*|putting it into practice|takeaways?)\s*:?$/i.test(closing.title || "");
+    if (!outlineHasClosing && looksInvented) {
+      if (closing.bullets.length || closing.body) {
+        middle.push({ ...closing, layout: closing.bullets.length ? "bullets" : "paragraph" });
+      }
+      closing = undefined;
+    }
+  }
   // Editorial closing mirrors cover — no synthetic "Key Takeaways". Only keep explicit closings; if none, create a minimal editorial end that mirrors cover.
   if (isDeck && !closing) {
     closing = {
@@ -684,7 +791,7 @@ export function designPass(outline: Outline, blocks: Block[], format: Format): D
     audience: outline.audience,
     tone: outline.tone,
     language: outline.language,
-    theme: outline.theme,
+    theme: resolvedTheme,
     pageSize: outline.pageSize,
     format,
     originFormat: format,

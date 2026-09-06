@@ -134,7 +134,7 @@ export async function* expandOutlineStream(payload: ExpandRequest): AsyncGenerat
   }
 }
 
-export async function renderFile(spec: DocumentSpec, format: Format): Promise<{ blob: Blob; fileName: string }> {
+export async function renderFile(spec: DocumentSpec, format: Format): Promise<{ blob: Blob; fileName: string; convertedFrom?: string; warnings?: string }> {
   let res: Response;
   try {
     res = await fetch("/api/render", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec, format }) });
@@ -144,7 +144,15 @@ export async function renderFile(spec: DocumentSpec, format: Format): Promise<{ 
   if (!res.ok) await readError(res, `Could not render the ${format.toUpperCase()}`);
   const blob = await res.blob();
   const fileName = res.headers.get("X-File-Name") || `document.${format}`;
-  return { blob, fileName };
+  const convertedFrom = res.headers.get("X-Converted") || undefined;
+  let warnings: string | undefined;
+  try {
+    const raw = res.headers.get("X-Warnings");
+    warnings = raw ? decodeURIComponent(raw) : undefined;
+  } catch {
+    warnings = undefined;
+  }
+  return { blob, fileName, convertedFrom, warnings };
 }
 
 /** PDF twin of the given format, for on-screen preview and image export. */

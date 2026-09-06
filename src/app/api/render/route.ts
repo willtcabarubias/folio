@@ -55,19 +55,20 @@ export async function POST(req: Request) {
 
   try {
     let spec = sanitize(body.spec, format);
-    // Export lock: pptx→pptx/pdf (pdf keeps slide size), docx/pdf → docx/pdf
     const origin = (spec as any).originFormat as Format | undefined;
-    const allow: Record<Format, Format[]> = {
-      pptx: ["pptx", "pdf"],
-      docx: ["docx", "pdf"],
-      pdf: ["pdf", "docx"],
-    };
-    if (origin && !allow[origin].includes(format)) {
-      return NextResponse.json({ error: `This document was created as ${origin.toUpperCase()} and can only be exported as ${allow[origin].join("/").toUpperCase()}.` }, { status: 403 });
-    }
-    // Keep slide geometry for pptx→pdf (no reflow): use slide PDF, not document reflow
+    // Hybrid architecture: allow cross-format export via safe reflow instead of hard 403.
+    // - pptx->pdf keeps slide geometry (no reflow, best fidelity).
+    // - docx<->pdf reflows via designPass + fitToPages (structure preserved, pagination adapts).
+    // - pptx<->docx and pdf->pptx are allowed but flagged as converted (layout adapts, warn in UI via X-Converted header).
     const isSameSlidePdf = origin === "pptx" && format === "pdf";
-    if (!isSameSlidePdf && spec.format !== format) spec = await redesign(spec, format);
+    const needsRedesign = !isSameSlidePdf && spec.format !== format;
+    let converted = false;
+    if (needsRedesign) {
+      const from = spec.format;
+      spec = await redesign(spec, format);
+      // Mark non-trivial conversions so UI can toast "Converted from X — check layout".
+      converted = (from === "pptx" && format === "docx") || (from !== "pptx" && format === "pptx");
+    }
 
     if (body.preview) {
       const buffer = format === "pptx" ? await renderSlidesPdf(spec) : await renderPdf(spec);
@@ -81,14 +82,30 @@ export async function POST(req: Request) {
     if (format === "pptx") buffer = await renderPptx(spec);
     else if (format === "docx") buffer = await renderDocx(spec);
     else {
-      if (pdfSupportRatio(spec) < 0.85) {
-        return NextResponse.json({ error: "PDF export currently supports Latin-script languages. Export as DOCX or PPTX for this document." }, { status: 422 });
+      const ratio = pdfSupportRatio(spec);
+      if (ratio < 0.85) {
+        return NextResponse.json(
+          {
+            error: `PDF export supports Latin-script languages (this doc is ${Math.round(ratio * 100)}% Latin). Export as DOCX for full fidelity, then Save-as-PDF in Word.`,
+            code: "non_latin_pdf",
+            hint: "DOCX preserves all scripts. PDF uses WinAnsi standard fonts only.",
+          },
+          { status: 422 },
+        );
       }
       // pptx origin pdf keeps slide size (no reflow)
       if ((spec as any).originFormat === "pptx" || spec.format === "pptx") buffer = await renderSlidesPdf(spec);
       else buffer = await renderPdf(spec);
     }
     const filename = safeFileName(spec.title, format);
+    // QA warnings as header (non-blocking, UI can toast). Keep small to avoid header limits.
+    let qaHeader = "";
+    try {
+      const { validateSpecForExport } = await import("@/lib/validate");
+      qaHeader = validateSpecForExport(spec).slice(0, 3).join(" | ").slice(0, 500);
+    } catch {
+      // QA must never break render.
+    }
     return new Response(new Uint8Array(buffer), {
       status: 200,
       headers: {
@@ -97,6 +114,8 @@ export async function POST(req: Request) {
         "Content-Length": String(buffer.length),
         "Cache-Control": "no-store",
         "X-File-Name": filename,
+        ...(converted ? { "X-Converted": `from-${origin ?? spec.format}` } : {}),
+        ...(qaHeader ? { "X-Warnings": encodeURIComponent(qaHeader) } : {}),
       },
     });
   } catch (err) {

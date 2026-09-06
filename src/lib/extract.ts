@@ -16,6 +16,8 @@ export function fileKind(name: string, mime: string): string {
   if (ext === "pdf" || mime === "application/pdf") return "pdf";
   if (ext === "docx" || mime.includes("wordprocessingml")) return "docx";
   if (ext === "pptx" || mime.includes("presentationml")) return "pptx";
+  // Legacy Office formats: detect early for a helpful message (convert via Word/PowerPoint or LibreOffice).
+  if (ext === "doc" || ext === "ppt" || ext === "xls" || ext === "xlsx") return `legacy-${ext}`;
   if (IMAGE_EXT.has(ext) || mime.startsWith("image/")) return "image";
   if (TEXT_EXT.has(ext) || mime.startsWith("text/") || mime === "application/json") return ext || "txt";
   return "unsupported";
@@ -23,6 +25,12 @@ export function fileKind(name: string, mime: string): string {
 
 export async function extractText(buffer: Buffer, name: string, mime: string): Promise<ExtractResult> {
   const kind = fileKind(name, mime);
+  if (kind.startsWith("legacy-")) {
+    const ext = kind.replace("legacy-", "");
+    throw new Error(
+      `Legacy .${ext} files aren't supported directly. Please open in Word/PowerPoint (or LibreOffice) and save as .${ext}x, DOCX/PPTX, or PDF, then re-upload.`,
+    );
+  }
   if (kind === "unsupported") throw new Error("Unsupported file type. Use PDF, DOCX, PPTX, TXT, MD, CSV or images (PNG, JPG, WEBP).");
 
   let text = "";
@@ -34,9 +42,12 @@ export async function extractText(buffer: Buffer, name: string, mime: string): P
   }
   if (kind === "pdf") {
     const { extractText: unpdfExtract } = await import("unpdf");
-    const result = await unpdfExtract(new Uint8Array(buffer), { mergePages: true });
-    text = typeof result.text === "string" ? result.text : (result.text as unknown as string[]).join("\n\n");
-    pages = result.totalPages;
+    // Hybrid: keep page boundaries (don't merge) so citations stay accurate and
+    // truncation can keep head+tail instead of cutting the tail blindly.
+    const result = await unpdfExtract(new Uint8Array(buffer), { mergePages: false });
+    const pagesArr = Array.isArray(result.text) ? (result.text as unknown as string[]) : [String(result.text ?? "")];
+    pages = result.totalPages ?? pagesArr.length;
+    text = pagesArr.map((p, i) => `--- Page ${i + 1} ---\n${p}`).join("\n\n");
   } else if (kind === "docx") {
     const mammoth = await import("mammoth");
     const result = await mammoth.extractRawText({ buffer });
@@ -49,8 +60,20 @@ export async function extractText(buffer: Buffer, name: string, mime: string): P
   }
 
   text = tidy(text);
-  if (!text) throw new Error("No readable text found in this file (scanned PDFs need OCR).");
-  if (text.length > MAX_TEXT_CHARS) text = `${text.slice(0, MAX_TEXT_CHARS)}\n[... truncated]`;
+  if (!text) {
+    if (kind === "pdf") {
+      throw new Error(
+        "No readable text found in this PDF — it looks scanned/image-only. OCR isn't built in yet: please export with selectable text, or attach a clear PNG/JPG (vision will read it), or paste the text.",
+      );
+    }
+    throw new Error("No readable text found in this file.");
+  }
+  if (text.length > MAX_TEXT_CHARS) {
+    // Keep head (context) + tail (conclusions) instead of head-only truncation.
+    const head = Math.floor(MAX_TEXT_CHARS * 0.7);
+    const tail = MAX_TEXT_CHARS - head;
+    text = `${text.slice(0, head)}\n\n[... truncated ${text.length - MAX_TEXT_CHARS} chars — middle omitted ...]\n\n${text.slice(-tail)}`;
+  }
   return { text, pages, kind };
 }
 

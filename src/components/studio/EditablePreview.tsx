@@ -65,51 +65,60 @@ function fieldCls(disabled?: boolean) {
 }
 
 export function EditablePreview({ spec, onChange, busy, streaming }: Props) {
+  // Bulletproof: ignore malformed blocks from interrupted streams (never crash preview).
+  const safeBlocks = (spec.blocks ?? []).filter((b) => b && typeof b.id === "string" && typeof b.title === "string");
+  const sync = (nextBlocks: typeof safeBlocks) => onChange({ ...spec, blocks: nextBlocks });
   const updateBlock = (idx: number, patch: Partial<Block>) => {
-    const next = spec.blocks.slice();
+    const next = safeBlocks.slice();
+    if (!next[idx]) return;
     next[idx] = { ...next[idx], ...patch };
-    onChange({ ...spec, blocks: next });
+    sync(next);
   };
   const moveBlock = (idx: number, dir: -1 | 1) => {
     const j = idx + dir;
-    if (j < 0 || j >= spec.blocks.length) return;
-    const next = spec.blocks.slice();
+    if (j < 0 || j >= safeBlocks.length) return;
+    const next = safeBlocks.slice();
     [next[idx], next[j]] = [next[j], next[idx]];
-    onChange({ ...spec, blocks: next });
+    sync(next);
   };
   const removeBlock = (idx: number) => {
-    if (spec.blocks.length <= 1) return;
-    onChange({ ...spec, blocks: spec.blocks.filter((_, i) => i !== idx) });
+    if (safeBlocks.length <= 1) return;
+    sync(safeBlocks.filter((_, i) => i !== idx));
   };
   const duplicateBlock = (idx: number) => {
-    const src = spec.blocks[idx];
-    const ids = new Set(spec.blocks.map((b) => b.id));
+    const src = safeBlocks[idx];
+    if (!src) return;
+    const ids = new Set(safeBlocks.map((b) => b.id));
     let n = 0;
     let id = `${src.id}_copy`;
     while (ids.has(id)) id = `${src.id}_copy${++n}`;
-    const next = spec.blocks.slice();
+    const next = safeBlocks.slice();
     next.splice(idx + 1, 0, { ...src, id, title: `${src.title} (copy)` });
-    onChange({ ...spec, blocks: next });
+    sync(next);
   };
   const removeBullet = (idx: number, bi: number) => {
-    const b = spec.blocks[idx];
-    updateBlock(idx, { bullets: b.bullets.filter((_, k) => k !== bi) });
+    const b = safeBlocks[idx];
+    if (!b) return;
+    const bullets = Array.isArray(b.bullets) ? b.bullets : [];
+    updateBlock(idx, { bullets: bullets.filter((_, k) => k !== bi) });
   };
   const addBullet = (idx: number, text: string) => {
     const v = text.trim();
     if (!v) return;
-    const b = spec.blocks[idx];
-    updateBlock(idx, { bullets: [...b.bullets, v] });
+    const b = safeBlocks[idx];
+    if (!b) return;
+    const bullets = Array.isArray(b.bullets) ? b.bullets : [];
+    updateBlock(idx, { bullets: [...bullets, v] });
   };
-
   return (
     <div className="scroll-thin h-full overflow-y-auto bg-[linear-gradient(180deg,#F2F5FC_0%,#EFF3FB_100%)] px-3 py-5 md:px-6">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
-        {spec.blocks.map((block, idx) => {
-          const isLastStreaming = Boolean(streaming && idx === spec.blocks.length - 1);
+        {safeBlocks.map((block, idx) => {
+          const bullets = Array.isArray(block.bullets) ? block.bullets : [];
+          const isLastStreaming = Boolean(streaming && idx === safeBlocks.length - 1);
           return (
           <div
-            key={block.id}
+            key={`${block.id}-${idx}`}
             className={`group relative flex flex-col rounded-2xl bg-white shadow-[0_8px_30px_-18px_rgba(20,40,90,0.25)] ring-1 ring-line ${busy && !streaming ? "opacity-60" : ""} ${streaming ? "animate-rise" : ""}`}
           >
             {/* block header — layout switch + move/duplicate/delete (structural cover/closing stay outline-owned) */}
@@ -192,16 +201,16 @@ export function EditablePreview({ spec, onChange, busy, streaming }: Props) {
               )}
 
               {/* bullets — edit, add (Enter), remove */}
-              {(block.bullets.length > 0 || !busy) && (
+              {(bullets.length > 0 || !busy) && (
                 <div className="space-y-1.5">
-                  <label className="text-[11px] font-medium text-muted">Bullets · {block.bullets.length}</label>
+                  <label className="text-[11px] font-medium text-muted">Bullets · {bullets.length}</label>
                   <ul className="space-y-1">
-                    {block.bullets.map((it, i) => (
+                    {bullets.map((it, i) => (
                       <li key={i} className="group/bullet flex items-start gap-2 rounded-lg bg-slate-50 px-2 py-1 ring-1 ring-line">
                         <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-ink/60" />
                         <input
                           value={it}
-                          onChange={(e) => updateBlock(idx, { bullets: block.bullets.map((v, k) => (k === i ? e.target.value : v)) })}
+                          onChange={(e) => updateBlock(idx, { bullets: bullets.map((v, k) => (k === i ? e.target.value : v)) })}
                           disabled={busy}
                           className="flex-1 border-0 bg-transparent p-0 text-[13px] text-ink outline-none"
                         />

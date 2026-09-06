@@ -156,19 +156,45 @@ function bulletList(items: Prim[], box: Box, list: string[], o: { size: number; 
 /*  Layouts                                                             */
 /* ------------------------------------------------------------------ */
 
-// Conditional decoration: thin wavy-ish hairlines in corners, only when whitespace is generous
-function maybeDecorate(s: SlideScene, p: Palette, need: boolean) {
-  if (!need) return;
-  // top-right: 5 faint horizontal hairlines fanning slightly
-  const baseX = SLIDE_W - 0.92;
-  for (let i = 0; i < 5; i++) {
-    const yy = 0.18 + i * 0.07;
-    rect(s.items, baseX + i * 0.02, yy, 0.68 - i * 0.06, 0.01, p.line, { opacity: 0.28 });
+// Decor tokens for non-formal + pptx: sweeping corners like the divine-revelation reference.
+// Formal/dark decks stay clean. Dots for playful (coral), waves for warm/others.
+let currentOrnament: string | undefined;
+let currentMood: string | undefined;
+function maybeDecorate(s: SlideScene, p: Palette, need: boolean, ornament?: string, mood?: string) {
+  const orn = ornament ?? currentOrnament ?? "lines-diagonal";
+  const md = mood ?? currentMood;
+  if (md === "formal" || md === "dark") return;
+  if (orn === "none") return;
+  if (orn === "dots") {
+    // Playful gradient dots: top-right dense, bottom-left sparse (pptx approximation).
+    for (let r = 0; r < 3; r++) {
+      for (let cIdx = 0; cIdx < 4; cIdx++) {
+        const d = 0.075 - (r + cIdx) * 0.008;
+        if (d <= 0.02) continue;
+        circle(s.items, SLIDE_W - 0.55 - cIdx * 0.17 - r * 0.06, 0.22 + r * 0.17 + cIdx * 0.02, d, p.primary, Math.max(0.12, 0.34 - (r + cIdx) * 0.05));
+      }
+    }
+    for (let r = 0; r < 2; r++) {
+      for (let cIdx = 0; cIdx < 3; cIdx++) {
+        const d = 0.065 - (r + cIdx) * 0.008;
+        if (d <= 0.02) continue;
+        circle(s.items, 0.28 + cIdx * 0.17 + r * 0.06, SLIDE_H - 0.52 - r * 0.17, d, p.primary, Math.max(0.1, 0.28 - (r + cIdx) * 0.05));
+      }
+    }
+    return;
+  }
+  // Wave / lines-diagonal / pill / grid moods share the sweeping hairline token (pptx has no beziers).
+  if (!need && orn !== "wave") return;
+  // top-right: 7 faint sweeping hairlines
+  const baseX = SLIDE_W - 1.05;
+  for (let i = 0; i < 7; i++) {
+    const yy = 0.12 + i * 0.075;
+    rect(s.items, baseX + i * 0.025, yy, 0.85 - i * 0.07, 0.012, p.line, { opacity: 0.32 });
   }
   // bottom-left mirroring
-  for (let i = 0; i < 4; i++) {
-    const yy = SLIDE_H - 0.34 + i * 0.07;
-    rect(s.items, 0.18 + i * 0.02, yy, 0.6 - i * 0.05, 0.01, p.line, { opacity: 0.26 });
+  for (let i = 0; i < 6; i++) {
+    const yy = SLIDE_H - 0.42 + i * 0.075;
+    rect(s.items, 0.14 + i * 0.025, yy, 0.75 - i * 0.06, 0.012, p.line, { opacity: 0.3 });
   }
 }
 
@@ -608,6 +634,8 @@ export function buildDeck(spec: DocumentSpec): DeckScene {
   if (themeId === "mono" && resolved.themeId !== "mono") themeId = resolved.themeId;
   const t = getTheme(themeId);
   const p = palette(t);
+  currentOrnament = t.ornament;
+  currentMood = resolved.mood;
   const slides: SlideScene[] = [];
   let sectionNo = 0;
 
