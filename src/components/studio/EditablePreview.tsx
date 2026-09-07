@@ -110,9 +110,79 @@ export function EditablePreview({ spec, onChange, busy, streaming }: Props) {
     const bullets = Array.isArray(b.bullets) ? b.bullets : [];
     updateBlock(idx, { bullets: [...bullets, v] });
   };
+  const setHeader = (patch: Partial<{ group: string; members: string[]; subject: string; section: string }>) => {
+    const nextMembers = patch.members ?? spec.header?.members ?? [];
+    const nextGroup = (patch.group ?? spec.header?.group ?? "").trim();
+    const nextSubject = (patch.subject ?? spec.header?.subject ?? "").trim();
+    const nextSection = (patch.section ?? spec.header?.section ?? "").trim();
+    const header =
+      !nextGroup && !nextMembers.length && !nextSubject && !nextSection
+        ? undefined
+        : {
+            ...(nextGroup ? { group: nextGroup.slice(0, 60) } : {}),
+            ...(nextMembers.length ? { members: nextMembers.slice(0, 8) } : {}),
+            ...(nextSubject ? { subject: nextSubject.slice(0, 60) } : {}),
+            ...(nextSection ? { section: nextSection.slice(0, 60) } : {}),
+          };
+    onChange({ ...spec, header });
+  };
   return (
     <div className="scroll-thin h-full overflow-y-auto bg-[linear-gradient(180deg,#F2F5FC_0%,#EFF3FB_100%)] px-3 py-5 md:px-6">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+        {/* Cover-only header editor — prints on cover only, edits never regenerate. */}
+        <div className="flex flex-col rounded-2xl bg-white p-4 ring-1 ring-line">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs font-semibold text-ink md:text-[11px]">Cover header — cover only</p>
+            <span className="rounded-full bg-brand-soft px-2 py-0.5 text-[10px] font-medium text-ink">Cover only</span>
+          </div>
+          <div className="mt-2.5 grid gap-2 sm:grid-cols-2">
+            <input
+              value={spec.header?.group ?? ""}
+              onChange={(e) => setHeader({ group: e.target.value })}
+              disabled={busy}
+              placeholder="Group 1"
+              className="field h-8 text-[13px]"
+              aria-label="Cover group"
+            />
+            <input
+              value={spec.header?.subject ?? ""}
+              onChange={(e) => setHeader({ subject: e.target.value })}
+              disabled={busy}
+              placeholder="Subject (e.g. Science)"
+              className="field h-8 text-[13px]"
+              aria-label="Cover subject"
+            />
+            <input
+              value={spec.header?.section ?? ""}
+              onChange={(e) => setHeader({ section: e.target.value })}
+              disabled={busy}
+              placeholder="Section (e.g. 7-Ruby)"
+              className="field h-8 text-[13px]"
+              aria-label="Cover section"
+            />
+            <input
+              value={(spec.header?.members ?? []).join(" · ")}
+              onChange={(e) => {
+                const raw = e.target.value;
+                const parts = raw.split(/[·\n;|]+/).map((s) => s.trim()).filter(Boolean);
+                const out: string[] = [];
+                for (const p of parts) {
+                  if (p.includes(",") && (p.match(/,/g) ?? []).length >= 2 && !/^[A-Za-z'.\-]+\s*,\s*[A-Za-z'.\-]+\s*$/.test(p)) {
+                    // "Bayang, Jhazel, Catani, Claire" → pair into "Bayang, Jhazel" + "Catani, Claire".
+                    const toks = p.split(",").map((x) => x.trim()).filter(Boolean);
+                    for (let i = 0; i + 1 < toks.length; i += 2) out.push(`${toks[i]}, ${toks[i + 1]}`);
+                    if (toks.length % 2 === 1) out.push(toks[toks.length - 1]);
+                  } else out.push(p);
+                }
+                setHeader({ members: out });
+              }}
+              disabled={busy}
+              placeholder="Members — separated by · or new lines"
+              className="field h-8 text-[13px]"
+              aria-label="Cover members"
+            />
+          </div>
+        </div>
         {safeBlocks.map((block, idx) => {
           const bullets = Array.isArray(block.bullets) ? block.bullets : [];
           const isLastStreaming = Boolean(streaming && idx === safeBlocks.length - 1);

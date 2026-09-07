@@ -30,6 +30,22 @@ const LAYOUT_LABEL: Record<Layout, string> = {
 export function OutlineEditor({ outline, onChange, disabled }: Props) {
   const isDeck = outline.format === "pptx";
   const update = (sections: OutlineSection[]) => onChange({ ...outline, sections, targetLength: isDeck ? sections.length : outline.targetLength });
+  const setHeader = (patch: Partial<{ group: string; members: string[]; subject: string; section: string }>) => {
+    const nextMembers = patch.members ?? outline.header?.members ?? [];
+    const nextGroup = (patch.group ?? outline.header?.group ?? "").trim();
+    const nextSubject = (patch.subject ?? outline.header?.subject ?? "").trim();
+    const nextSection = (patch.section ?? outline.header?.section ?? "").trim();
+    const header =
+      !nextGroup && !nextMembers.length && !nextSubject && !nextSection
+        ? undefined
+        : {
+            ...(nextGroup ? { group: nextGroup.slice(0, 60) } : {}),
+            ...(nextMembers.length ? { members: nextMembers.slice(0, 8) } : {}),
+            ...(nextSubject ? { subject: nextSubject.slice(0, 60) } : {}),
+            ...(nextSection ? { section: nextSection.slice(0, 60) } : {}),
+          };
+    onChange({ ...outline, header });
+  };
 
   const updateSection = (idx: number, patch: Partial<OutlineSection>) => update(outline.sections.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
   const move = (idx: number, dir: -1 | 1) => {
@@ -52,6 +68,63 @@ export function OutlineEditor({ outline, onChange, disabled }: Props) {
 
   return (
     <div className="mx-auto max-w-3xl space-y-2.5">
+      {/* Cover-only header: Group + members print on the cover only, never in body. */}
+      <div className="card-solid p-4">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-semibold tracking-tight text-ink md:text-[11px]">Cover header — prints on cover only</p>
+          <span className="chip chip-brand">Cover only</span>
+        </div>
+        <div className="mt-3 grid gap-2">
+          <div className="grid gap-2 sm:grid-cols-3">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-ink md:text-[11px]">Group</span>
+              <input
+                value={outline.header?.group ?? ""}
+                onChange={(e) => setHeader({ group: e.target.value })}
+                disabled={disabled}
+                placeholder="e.g. Group 1"
+                className="field h-10 md:h-9"
+                aria-label="Cover group"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-ink md:text-[11px]">Subject</span>
+              <input
+                value={outline.header?.subject ?? ""}
+                onChange={(e) => setHeader({ subject: e.target.value })}
+                disabled={disabled}
+                placeholder="e.g. Science"
+                className="field h-10 md:h-9"
+                aria-label="Cover subject"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-ink md:text-[11px]">Section</span>
+              <input
+                value={outline.header?.section ?? ""}
+                onChange={(e) => setHeader({ section: e.target.value })}
+                disabled={disabled}
+                placeholder="e.g. 7-Ruby"
+                className="field h-10 md:h-9"
+                aria-label="Cover section"
+              />
+            </label>
+          </div>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-ink md:text-[11px]">Members — one per line</span>
+            <textarea
+              value={(outline.header?.members ?? []).join("\n")}
+              onChange={(e) => setHeader({ members: e.target.value.split(/\n+/).map((s) => s.trim()).filter(Boolean) })}
+              disabled={disabled}
+              placeholder={"Bayang, Jhazel\nCatani, Claire"}
+              rows={3}
+              className="field min-h-[72px] resize-none py-2.5"
+              aria-label="Cover members"
+            />
+          </label>
+          <p className="text-[11px] leading-relaxed text-muted/70 md:text-[10px]">Or ask in chat: “put Group 1 + names on top” — no regeneration needed.</p>
+        </div>
+      </div>
       {outline.sections.map((s, i) => (
         <SectionCard
           key={s.id}

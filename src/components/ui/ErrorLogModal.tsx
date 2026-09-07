@@ -1,51 +1,63 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Bug, ChevronDown, ChevronUp, Copy, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { Check, ChevronDown, Copy, LifeBuoy, RotateCcw, CircleCheck, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useErrorLog } from "@/lib/error/store";
 import type { AppError } from "@/lib/error/types";
 
-function timeLabel(ts: number) {
-  const d = new Date(ts);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+function friendlySummary(e?: AppError): string {
+  if (!e) return "Something didn't work as expected.";
+  if (e.status === 504 || e.status === 408)
+    return "This took a little too long and timed out. Please try again — a shorter document usually works better.";
+  if (e.status === 413) return "This looks a bit too large to process right now. Please try a smaller file.";
+  if (e.status && e.status >= 500) return "Our service had a brief hiccup. Please try again in a moment.";
+  if (e.status && e.status >= 400) return "We couldn't complete that request. Please check your input and try again.";
+  const msg = e.message.toLowerCase();
+  if (msg.includes("network") || msg.includes("fetch") || msg.includes("failed") || msg.includes("load"))
+    return "We're having trouble reaching the service. Please check your connection and try again.";
+  return "Something didn't work as expected. Please try again.";
 }
 
-function sourceLabel(s: AppError["source"]) {
-  const map: Record<string, string> = {
-    "api:render": "Render",
-    "api:expand": "Expand",
-    "api:agent": "Agent",
-    "api:extract": "Extract",
-    "client:export": "Export",
-    "client:preview": "Preview",
-    "window:onerror": "Window",
-    "window:unhandledrejection": "Promise",
-  };
-  return map[s] ?? s;
-}
-
-function statusTone(e: AppError) {
-  if (e.status === 504 || e.status === 408) return "bg-amber-100 text-amber-800 ring-amber-200";
-  if (e.status && e.status >= 500) return "bg-red-50 text-red-700 ring-red-200";
-  if (e.status && e.status >= 400) return "bg-orange-50 text-orange-700 ring-orange-200";
-  return "bg-slate-100 text-slate-700 ring-slate-200";
+function buildSupportReport(errors: AppError[]): string {
+  const lines = [
+    "Folio — support details",
+    `Date: ${new Date().toLocaleString()}`,
+    `Issues noticed: ${errors.length}`,
+    "",
+    "What you can tell the developer:",
+    `"I saw a 'Something didn't go as planned' message. I've pasted the details below."`,
+    "",
+    "--- Details for the developer ---",
+    JSON.stringify(errors, null, 2),
+  ];
+  return lines.join("\n");
 }
 
 function useIsMounted() {
-  const [m, setM] = useState(false);
-  useEffect(() => setM(true), []);
-  return m;
+  return useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false,
+  );
 }
 
 export function ErrorLogModal() {
-  const { errors, isOpen, close, clear, remove } = useErrorLog();
+  const { errors, isOpen, close, clear } = useErrorLog();
   const mounted = useIsMounted();
-  const overlayRef = useRef<HTMLDivElement>(null);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
+  const [copied, setCopied] = useState(false);
 
-  // lock scroll when open
+  // Reset local UI each time the dialog opens — intentional reset when dialog session starts
+  useEffect(() => {
+    if (isOpen) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setShowDetails(false);
+      setCopied(false);
+    }
+  }, [isOpen]);
+
+  // Lock scroll when open
   useEffect(() => {
     if (!isOpen) return;
     const prev = document.body.style.overflow;
@@ -55,7 +67,7 @@ export function ErrorLogModal() {
     };
   }, [isOpen]);
 
-  // esc to close
+  // Esc to close
   useEffect(() => {
     if (!isOpen) return;
     const onKey = (e: KeyboardEvent) => {
@@ -65,256 +77,177 @@ export function ErrorLogModal() {
     return () => window.removeEventListener("keydown", onKey);
   }, [isOpen, close]);
 
-  const onCopy = useCallback(async (e: AppError) => {
-    const payload = JSON.stringify(e, null, 2);
+  const latest = errors[0];
+  const summary = useMemo(() => friendlySummary(latest), [latest]);
+
+  const onCopyAll = useCallback(async () => {
+    const payload = buildSupportReport(errors);
     try {
       await navigator.clipboard.writeText(payload);
-      setCopiedId(e.id);
-      setTimeout(() => setCopiedId(null), 1600);
     } catch {
-      // fallback
       const ta = document.createElement("textarea");
       ta.value = payload;
       document.body.appendChild(ta);
       ta.select();
       document.execCommand("copy");
       ta.remove();
-      setCopiedId(e.id);
-      setTimeout(() => setCopiedId(null), 1600);
     }
-  }, []);
-
-  const onCopyAll = useCallback(async () => {
-    const payload = JSON.stringify(errors, null, 2);
-    try {
-      await navigator.clipboard.writeText(payload);
-      setCopiedId("__all__");
-      setTimeout(() => setCopiedId(null), 1600);
-    } catch {}
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
   }, [errors]);
 
-  const hasErrors = errors.length > 0;
-  const title = useMemo(() => {
-    if (!hasErrors) return "No errors";
-    if (errors.length === 1) return "1 error";
-    return `${errors.length} errors`;
-  }, [errors.length, hasErrors]);
+  const onRetry = useCallback(() => {
+    close();
+    // Small delay so the dialog closes cleanly before reload
+    setTimeout(() => window.location.reload(), 80);
+  }, [close]);
 
   if (!mounted || !isOpen) return null;
 
+  const hasErrors = errors.length > 0;
+
   const node = (
-    <div
-      ref={overlayRef}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Error log"
-      className="fixed inset-0 z-[100] flex items-center justify-center p-3 md:p-4"
-      onMouseDown={(e) => {
-        if (e.target === overlayRef.current) close();
-      }}
-    >
-      {/* backdrop */}
-      <div className="absolute inset-0 bg-ink/55 backdrop-blur-[2px]" onClick={close} aria-hidden="true" />
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="Something went wrong">
+      <div className="absolute inset-0 bg-ink/40 backdrop-blur-sm" onClick={close} aria-hidden="true" />
 
-      {/* panel */}
-      <div className="relative flex max-h-[86vh] w-full max-w-[720px] flex-col overflow-hidden rounded-[20px] bg-white shadow-float ring-1 ring-line md:max-h-[78vh]">
-        {/* header */}
-        <div className="flex items-center gap-3 border-b border-line/60 px-4 py-3.5 md:px-5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-red-50 ring-1 ring-red-200">
-            <AlertTriangle size={18} className="text-red-600" aria-hidden="true" />
+      <div className="relative flex max-h-[90dvh] w-full max-w-[560px] flex-col overflow-hidden rounded-[22px] bg-white shadow-float ring-1 ring-line/40 animate-rise md:rounded-[19px]">
+        {/* header — calm, matches app dialogs */}
+        <div className="flex items-center justify-between px-6 py-4 md:px-5 md:py-3.5">
+          <div className="flex items-center gap-3">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-soft text-ink md:h-8 md:w-8">
+              <LifeBuoy size={16} className="md:h-3.5 md:w-3.5" aria-hidden="true" />
+            </span>
+            <div>
+              <h2 className="text-[15px] font-semibold tracking-tight text-ink md:text-[13px]">Something didn&apos;t go as planned</h2>
+              <p className="mt-0.5 text-xs text-muted md:text-[11px]">Don&apos;t worry — your work is safe.</p>
+            </div>
           </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="text-[15px] font-semibold tracking-tight text-ink md:text-[14px]">Error log</h2>
-            <p className="text-xs leading-none text-muted md:text-[11px]">
-              {title} · most recent first · session storage
-            </p>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={onCopyAll}
-              disabled={!hasErrors}
-              className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-ink ring-1 ring-line hover:bg-slate-50 disabled:opacity-40 md:px-2.5 md:py-1 md:text-[11px]"
-            >
-              <Copy size={13} className="md:h-3 md:w-3" />
-              {copiedId === "__all__" ? "Copied" : "Copy all"}
-            </button>
-            <button
-              type="button"
-              onClick={clear}
-              disabled={!hasErrors}
-              className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-ink ring-1 ring-line hover:bg-slate-50 disabled:opacity-40 md:px-2.5 md:py-1 md:text-[11px]"
-            >
-              <Trash2 size={13} className="md:h-3 md:w-3" />
-              Clear
-            </button>
-            <button
-              type="button"
-              onClick={close}
-              aria-label="Close error log"
-              className="ml-1 flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white hover:bg-black md:h-7 md:w-7"
-            >
-              <X size={16} className="md:h-3.5 md:w-3.5" />
-            </button>
-          </div>
-        </div>
-
-        {/* hint */}
-        <div className="border-b border-amber-200/60 bg-amber-50 px-4 py-2.5 text-xs leading-5 text-amber-900 md:px-5 md:text-[11px]">
-          <span className="font-semibold">Vercel Hobby tip:</span> free tier kills functions after 10s (504). Exports that hit this will appear as <code className="rounded bg-amber-100 px-1 py-0.5">504 / FUNCTION_TIMEOUT</code>. Shorten the doc or retry – detailed response below helps confirm.
+          <button
+            type="button"
+            onClick={close}
+            aria-label="Dismiss"
+            className="flex h-8 w-8 items-center justify-center rounded-full bg-shell text-muted transition hover:bg-line hover:text-ink md:h-7 md:w-7"
+          >
+            <X size={16} className="md:h-3.5 md:w-3.5" />
+          </button>
         </div>
 
         {/* body */}
-        <div className="scroll-thin flex-1 overflow-y-auto bg-[#fcfdfc] p-3 md:p-4">
+        <div className="scroll-thin flex-1 overflow-y-auto px-6 pb-4 md:px-5">
           {!hasErrors ? (
-            <div className="flex flex-col items-center justify-center gap-3 rounded-2xl bg-white px-6 py-14 text-center ring-1 ring-line">
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-brand-soft ring-1 ring-line">
-                <Bug size={18} className="text-ink" />
-              </div>
-              <p className="text-sm font-medium text-ink md:text-xs">No errors captured this session</p>
-              <p className="max-w-sm text-xs leading-5 text-muted md:text-[11px]">
-                Errors from <code className="rounded bg-slate-100 px-1">/api/*</code>, window crashes and unhandled rejections will appear here automatically.
+            <div className="flex flex-col items-center px-6 py-10 text-center">
+              <span className="flex h-10 w-10 items-center justify-center rounded-full bg-brand-soft text-ink md:h-9 md:w-9">
+                <CircleCheck size={18} aria-hidden="true" />
+              </span>
+              <p className="mt-3 text-sm font-medium text-ink md:text-xs">All good — no issues found</p>
+              <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted md:text-[11px]">
+                If something isn&apos;t working, try again. You can safely close this message.
               </p>
             </div>
           ) : (
-            <ul className="flex flex-col gap-3">
-              {errors.map((e) => {
-                const isExp = !!expanded[e.id];
-                return (
-                  <li
-                    key={e.id}
-                    className="overflow-hidden rounded-2xl bg-white shadow-[0_8px_30px_-18px_rgba(20,40,90,0.22)] ring-1 ring-line"
-                  >
-                    {/* row head */}
-                    <div className="flex items-start gap-3 px-3.5 py-3 md:px-4">
-                      <span
-                        className={`inline-flex shrink-0 items-center rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 md:text-[10px] ${e.severity === "error" ? "bg-red-50 text-red-700 ring-red-200" : "bg-amber-50 text-amber-700 ring-amber-200"}`}
-                      >
-                        {e.severity.toUpperCase()}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="break-words text-[13px] font-semibold leading-5 text-ink md:text-[12px]">{e.message}</p>
-                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 md:text-[10px] ${statusTone(e)}`}>
-                            {e.status ? `${e.status}` : "—"} {e.status === 504 ? "TIMEOUT" : e.status === 422 ? "UNPROCESSABLE" : ""}
-                          </span>
-                          <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-ink ring-1 ring-line md:text-[10px]">
-                            {sourceLabel(e.source)}
-                          </span>
-                          <span className="text-[11px] text-muted md:text-[10px]">{timeLabel(e.time)}</span>
-                          {e.url ? <span className="truncate text-[11px] text-muted md:text-[10px]">{e.method ?? "GET"} {e.url}</span> : null}
-                        </div>
-                        {e.hint ? <p className="mt-2 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 ring-1 ring-amber-200 md:text-[11px]">{e.hint}</p> : null}
-                      </div>
-                      <div className="flex shrink-0 items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => onCopy(e)}
-                          className="flex h-8 w-8 items-center justify-center rounded-full bg-white text-muted ring-1 ring-line hover:bg-slate-50 hover:text-ink md:h-7 md:w-7"
-                          aria-label="Copy error"
-                        >
-                          <Copy size={14} className="md:h-3 md:w-3" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setExpanded((p) => ({ ...p, [e.id]: !p[e.id] }))}
-                          className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white hover:bg-black md:h-7 md:w-7"
-                          aria-label={isExp ? "Collapse" : "Expand"}
-                        >
-                          {isExp ? <ChevronUp size={14} className="md:h-3 md:w-3" /> : <ChevronDown size={14} className="md:h-3 md:w-3" />}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => remove(e.id)}
-                          className="flex h-8 w-8 items-center justify-center rounded-full bg-white text-muted ring-1 ring-line hover:bg-red-50 hover:text-red-600 md:h-7 md:w-7"
-                          aria-label="Dismiss"
-                        >
-                          <X size={14} className="md:h-3 md:w-3" />
-                        </button>
-                      </div>
-                    </div>
+            <div className="flex flex-col gap-3 md:gap-2.5">
+              {/* friendly explanation */}
+              <div className="rounded-2xl bg-shell/60 p-4 ring-1 ring-line/50 md:p-3.5">
+                <p className="text-sm leading-relaxed text-ink md:text-[13px]">{summary}</p>
+                <p className="mt-2 text-xs leading-relaxed text-muted md:text-[11px]">
+                  If you keep seeing this, please contact the developer and include the details below — it helps us fix
+                  things faster.
+                  {errors.length > 1 ? ` We noticed ${errors.length} hiccups, showing the most recent one.` : ""}
+                </p>
+              </div>
 
-                    {isExp ? (
-                      <div className="border-t border-line/60 bg-slate-50/70 px-3.5 py-3 md:px-4">
-                        {e.details ? (
-                          <div className="mb-3">
-                            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted">Details</p>
-                            <pre className="max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-xs leading-5 text-ink ring-1 ring-line md:text-[11px]">
-                              {e.details}
-                            </pre>
-                          </div>
-                        ) : null}
-                        {e.cause ? (
-                          <div className="mb-3">
-                            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted">Cause</p>
-                            <pre className="max-h-[160px] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-xs leading-5 text-ink ring-1 ring-line md:text-[11px]">
-                              {e.cause}
-                            </pre>
-                          </div>
-                        ) : null}
-                        {e.stack ? (
-                          <div className="mb-3">
-                            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted">Stack</p>
-                            <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white p-3 text-xs leading-5 text-ink ring-1 ring-line md:text-[11px]">
-                              {e.stack}
-                            </pre>
-                          </div>
-                        ) : null}
-                        <div className="flex flex-wrap gap-1.5 text-[11px] text-muted md:text-[10px]">
-                          <span className="rounded-full bg-white px-2 py-1 ring-1 ring-line">id: {e.id}</span>
-                          {e.requestId ? <span className="rounded-full bg-white px-2 py-1 ring-1 ring-line">req: {e.requestId}</span> : null}
-                          {e.meta ? <span className="rounded-full bg-white px-2 py-1 ring-1 ring-line">meta: {JSON.stringify(e.meta).slice(0, 200)}</span> : null}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => onCopy(e)}
-                          className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-xs font-medium text-white hover:bg-black md:px-2.5 md:py-1 md:text-[11px]"
-                        >
-                          <Copy size={13} className="md:h-3 md:w-3" />
-                          {copiedId === e.id ? "Copied!" : "Copy JSON"}
-                        </button>
-                      </div>
-                    ) : null}
+              {/* steps */}
+              <ol className="flex flex-col gap-2">
+                {[
+                  { n: "1", title: "Try again", sub: "This resolves most temporary issues." },
+                  { n: "2", title: "Copy details for the developer", sub: "One tap copies everything support needs." },
+                  { n: "3", title: "Send it to support", sub: "Paste the copied details in your message." },
+                ].map((s) => (
+                  <li key={s.n} className="flex items-center gap-3 rounded-xl bg-white px-3 py-2.5 ring-1 ring-line/50">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-ink text-xs font-semibold text-white md:h-6 md:w-6 md:text-[11px]">
+                      {s.n}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-xs font-semibold text-ink md:text-[11px]">{s.title}</span>
+                      <span className="block text-xs text-muted md:text-[11px]">{s.sub}</span>
+                    </span>
                   </li>
-                );
-              })}
-            </ul>
+                ))}
+              </ol>
+
+              {/* developer details — collapsed by default, de-emphasised */}
+              <div className="overflow-hidden rounded-xl bg-white ring-1 ring-line/50">
+                <button
+                  type="button"
+                  onClick={() => setShowDetails((v) => !v)}
+                  aria-expanded={showDetails}
+                  className="flex w-full items-center justify-between px-3 py-2.5 text-left transition hover:bg-shell/50"
+                >
+                  <span className="text-xs font-medium text-muted md:text-[11px]">Details for the developer</span>
+                  <span
+                    className={`flex h-6 w-6 items-center justify-center rounded-full bg-shell text-muted transition-transform ${showDetails ? "rotate-180" : ""}`}
+                  >
+                    <ChevronDown size={14} className="md:h-3 md:w-3" />
+                  </span>
+                </button>
+                {showDetails ? (
+                  <div className="border-t border-line/50 bg-shell/40 p-3">
+                    <pre className="scroll-thin max-h-[180px] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-white p-3 text-[11px] leading-5 text-muted ring-1 ring-line/50 md:text-[10px]">
+                      {JSON.stringify(
+                        errors.map((e) => ({
+                          time: new Date(e.time).toLocaleString(),
+                          message: e.message,
+                          status: e.status,
+                          url: e.url,
+                          details: e.details,
+                        })),
+                        null,
+                        2,
+                      )}
+                    </pre>
+                    <div className="mt-2 flex items-center justify-between">
+                      <p className="text-[11px] text-muted/70 md:text-[10px]">Only needed if you contact support.</p>
+                      <button
+                        type="button"
+                        onClick={clear}
+                        className="text-[11px] font-medium text-muted underline-offset-2 hover:text-ink hover:underline md:text-[10px]"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
           )}
         </div>
 
-        {/* footer */}
-        <div className="flex items-center justify-between border-t border-line/60 bg-white px-4 py-3 text-xs text-muted md:px-5 md:text-[11px]">
-          <span>
-            Log kept in <code className="rounded bg-slate-100 px-1">sessionStorage</code> · cleared on tab close
-          </span>
-          <button type="button" onClick={close} className="btn-primary">
-            Close
-          </button>
+        {/* footer — matches app dialog pattern */}
+        <div className="flex flex-col gap-2 border-t border-line/60 bg-shell/50 px-6 py-3 md:px-5 md:py-2.5">
+          <div className="flex items-center justify-end gap-2">
+            <button type="button" onClick={close} className="btn-ghost h-9 md:h-8">
+              Dismiss
+            </button>
+            {hasErrors ? (
+              <button type="button" onClick={onCopyAll} className="btn-secondary h-9 md:h-8">
+                {copied ? <Check size={14} className="md:h-3 md:w-3" /> : <Copy size={14} className="md:h-3 md:w-3" />}
+                {copied ? "Copied" : "Copy details"}
+              </button>
+            ) : null}
+            <button type="button" onClick={onRetry} className="btn-primary h-9 md:h-8">
+              <RotateCcw size={14} className="md:h-3 md:w-3" />
+              Try again
+            </button>
+          </div>
+          {copied ? (
+            <p className="text-right text-[11px] text-muted md:text-[10px]">
+              Copied — paste it in your message to the developer.
+            </p>
+          ) : null}
         </div>
       </div>
     </div>
   );
 
   return createPortal(node, document.body);
-}
-
-export function ErrorLogBadge() {
-  const { errors, hasUnread, open } = useErrorLog();
-  if (errors.length === 0 && !hasUnread) return null;
-  return (
-    <button
-      type="button"
-      onClick={open}
-      aria-label={hasUnread ? `Open error log, ${errors.length} errors, unread` : `Open error log, ${errors.length} errors`}
-      className={`relative inline-flex h-8 w-8 items-center justify-center rounded-full ring-1 transition md:h-7 md:w-7 ${hasUnread ? "bg-red-600 text-white ring-red-600 hover:bg-red-700" : "bg-white text-ink ring-line hover:bg-slate-50"}`}
-    >
-      <Bug size={14} className="md:h-3.5 md:w-3.5" />
-      {errors.length > 0 ? (
-        <span className="absolute -right-1 -top-1 flex min-h-[18px] min-w-[18px] items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-white">
-          {errors.length > 99 ? "99+" : errors.length}
-        </span>
-      ) : null}
-      {hasUnread ? <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-white ring-2 ring-red-600" aria-hidden="true" /> : null}
-    </button>
-  );
 }

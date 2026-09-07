@@ -93,6 +93,7 @@ export type ExpandStreamEvent =
   | { type: "start"; total: number; outline: { title: string; format: Format } }
   | { type: "block"; block: DocumentSpec["blocks"][number]; index: number }
   | { type: "done"; spec: DocumentSpec; warnings: string[]; fit: FitInfo | null }
+  | { type: "done"; spec: null; blocks: DocumentSpec["blocks"]; partial: true; warnings: string[]; fit: null }
   | { type: "error"; error: string };
 
 export async function* expandOutlineStream(payload: ExpandRequest): AsyncGenerator<ExpandStreamEvent, void, unknown> {
@@ -234,6 +235,9 @@ export function reportApiError(err: unknown, fallback: string, source: import("@
 /** Plain Markdown rendition of the generated content. */
 export function specToMarkdown(spec: DocumentSpec): string {
   const out: string[] = [`# ${spec.title}`];
+  if (spec.header?.group) out.push(`_${spec.header.group}_`);
+  if (spec.header?.subject || spec.header?.section) out.push(`_${[spec.header.subject, spec.header.section].filter(Boolean).join(" · ")}_`);
+  if (spec.header?.members?.length) out.push(`_${spec.header.members.join(" · ")}_`);
   if (spec.subtitle) out.push(`_${spec.subtitle}_`);
   out.push("");
   for (const b of spec.blocks) {

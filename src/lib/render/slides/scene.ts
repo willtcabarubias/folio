@@ -220,6 +220,13 @@ function coverLight(s: SlideScene, p: Palette, spec: DocumentSpec, b: Block) {
   s.bg = p.bg;
   rect(s.items, MX, 0.55, CW, 0.015, p.line, { opacity: 0.55 });
   text(s.items, { x: MX, y: 0.28, w: CW, h: 0.22 }, (spec.docType || "Folio").toUpperCase(), { size: 7, color: p.muted, charSpacing: 1.2 });
+  // Cover-only header kicker: Group label above the title.
+  const hgLight = (spec.header?.group || "").trim();
+  if (hgLight) text(s.items, { x: MX, y: 1.35, w: CW, h: 0.3 }, hgLight.toUpperCase(), { size: 9, bold: true, color: p.text, align: "center", charSpacing: 1 });
+  // Cover-only subject/section + members lines below pills (two lines only when both exist).
+  const hsLight = [(spec.header?.subject || "").trim(), (spec.header?.section || "").trim()].filter(Boolean).join(" · ");
+  const hmLight = (spec.header?.members ?? []).filter(Boolean).slice(0, 8);
+  const twoLines = Boolean(hsLight && hmLight.length);
   const title = (b.title || spec.title).toUpperCase();
   const fs = fitFont([title], 9.6, 2.35, 56, 28, 1.0);
   const titleH = estimatedHeight([title], 9.6, fs, 0.98, 0);
@@ -240,7 +247,7 @@ function coverLight(s: SlideScene, p: Palette, spec: DocumentSpec, b: Block) {
   // Dynamic pill Y: at least 0.32 below title box, clamped before bottom rule 6.92 with 0.6 clearance
   let py = titleY + titleBoxH + 0.32;
   if (py < 4.42) py = 4.42;
-  if (py + pillH > 6.32) py = 6.32 - pillH;
+  if (py + pillH > (twoLines ? 6.02 : 6.32)) py = (twoLines ? 6.02 : 6.32) - pillH;
   pillSlice.forEach((t) => {
     const w = pillWs[pillSlice.indexOf(t)];
     rect(s.items, px, py, w, pillH, p.bg, { radius: 0.16, stroke: { color: p.line, width: 0.7 } });
@@ -248,6 +255,14 @@ function coverLight(s: SlideScene, p: Palette, spec: DocumentSpec, b: Block) {
     px += w + pillGap;
   });
   rect(s.items, MX, 6.92, CW, 0.015, p.line, { opacity: 0.55 });
+  if (twoLines) {
+    text(s.items, { x: MX, y: 6.12, w: CW, h: 0.26 }, hsLight, { size: 7, color: p.muted, align: "center", valign: "middle" });
+    text(s.items, { x: MX, y: 6.42, w: CW, h: 0.36 }, hmLight.join("  ·  "), { size: 8, color: p.muted, align: "center", valign: "middle" });
+  } else if (hsLight) {
+    text(s.items, { x: MX, y: 6.42, w: CW, h: 0.4 }, hsLight, { size: 8, color: p.muted, align: "center", valign: "middle" });
+  } else if (hmLight.length) {
+    text(s.items, { x: MX, y: 6.42, w: CW, h: 0.4 }, hmLight.join("  ·  "), { size: 8, color: p.muted, align: "center", valign: "middle" });
+  }
   const footerTxt = (spec.author || spec.subtitle || "").trim().slice(0, 40);
   if (footerTxt) text(s.items, { x: MX, y: 7.02, w: CW, h: 0.22 }, footerTxt, { size: 7, color: p.muted, align: "center" });
 }
@@ -257,6 +272,10 @@ function coverDark(s: SlideScene, p: Palette, spec: DocumentSpec, b: Block) {
   s.bg = p.bg;
   rect(s.items, MX, 0.55, CW, 0.015, p.line, { opacity: p.dark ? 0.28 : 0.55 });
   text(s.items, { x: MX, y: 0.28, w: CW, h: 0.22 }, (spec.docType || "Folio").toUpperCase(), { size: 7, color: p.muted, charSpacing: 1.2 });
+  const hgDark = (spec.header?.group || "").trim();
+  if (hgDark) text(s.items, { x: MX, y: 0.62, w: CW, h: 0.28 }, hgDark.toUpperCase(), { size: 9, bold: true, color: p.text, charSpacing: 1 });
+  const hsDark = [(spec.header?.subject || "").trim(), (spec.header?.section || "").trim()].filter(Boolean).join(" · ");
+  if (hsDark) text(s.items, { x: MX, y: hgDark ? 0.92 : 0.62, w: CW, h: 0.26 }, hsDark, { size: 8, color: p.muted });
   const raw = (b.title || spec.title).toUpperCase();
   const parts = raw.split(/\s+/);
   const topWord = parts.slice(0, Math.ceil(parts.length / 2)).join(" ");
@@ -277,6 +296,8 @@ function coverDark(s: SlideScene, p: Palette, spec: DocumentSpec, b: Block) {
     text(s.items, { x: MX, y: py, w: pillW, h: 0.32 }, b.subtitle.toUpperCase().slice(0, 24), { size: 7, color: p.text, bold: true, align: "center", valign: "middle", charSpacing: 0.6 });
   }
   rect(s.items, MX, 6.92, CW, 0.015, p.line, { opacity: p.dark ? 0.28 : 0.55 });
+  const hmDark = (spec.header?.members ?? []).filter(Boolean).slice(0, 8);
+  if (hmDark.length) text(s.items, { x: MX, y: 6.42, w: CW, h: 0.4 }, hmDark.join("  ·  "), { size: 8, color: p.muted, align: "center", valign: "middle" });
   const footerTxt = (spec.author || spec.subtitle || "").trim().slice(0, 40);
   if (footerTxt) text(s.items, { x: MX, y: 7.02, w: CW, h: 0.22 }, footerTxt, { size: 7, color: p.muted, align: "center" });
 }
@@ -592,7 +613,7 @@ function closing(s: SlideScene, p: Palette, spec: DocumentSpec, b: Block) {
         text(s.items, { x: MX + CW * 0.14, y: anchorY + i * 0.52, w: CW * 0.72, h: 0.48 }, item, { size: bfs, color: p.muted, align: "center", valign: "middle" });
       });
     }
-    rect(s.items, MX, 6.92, CW, 0.015, p.line, { opacity: p.dark ? 0.28 : 0.55 });
+  rect(s.items, MX, 6.92, CW, 0.015, p.line, { opacity: p.dark ? 0.28 : 0.55 });
     const footerTxt = (spec.author || spec.subtitle || "").trim().slice(0, 48);
     if (footerTxt) text(s.items, { x: MX, y: 7.02, w: CW, h: 0.22 }, footerTxt, { size: 7, color: p.muted, align: "center" });
     return;

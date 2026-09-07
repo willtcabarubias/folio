@@ -153,6 +153,139 @@ export const TEMPLATES: DocTemplate[] = [
       T("Next Steps", "bullets", ["What to study next", "Practice tip"]),
     ],
   },
+  {
+    id: "activity-sheet",
+    label: "Classroom / Group Activity",
+    keywords: ["classroom activity", "group activity", "activity sheet", "performance task", "group task", "task sheet", "gawain", "pangkatang gawain"],
+    docType: "activity",
+    targetLength: 1,
+    sections: [
+      T("Task Overview", "paragraph", ["What to do", "Grouping and time limit", "Expected output"]),
+      T("Tasks", "timeline", ["Step-by-step tasks", "What to write per step", "How to present"]),
+      T("Guide Questions", "bullets", ["Question to answer", "What good answers include"]),
+      T("Scoring Guide", "table", ["Criteria per row", "Points per level", "What earns full marks"]),
+    ],
+  },
+  {
+    id: "position-paper",
+    label: "Position Paper",
+    keywords: ["position paper", "argumentative essay", "take a stand", "posisyong papel", "stand on the issue"],
+    docType: "position paper",
+    targetLength: 3,
+    sections: [
+      T("Background of the Issue", "paragraph", ["What the issue is", "Why it matters now"]),
+      T("Stand on the Issue", "paragraph", ["Clear thesis", "Relevance and significance"]),
+      T("Supporting Arguments", "bullets", ["Argument with evidence", "Argument with evidence", "Strongest point"]),
+      T("Counterarguments & Rebuttal", "comparison", ["Objection and why it falls short", "Rebuttal with evidence"]),
+      T("Conclusion", "closing", ["Restated stand", "Final thought"]),
+    ],
+  },
+  {
+    id: "case-study",
+    label: "Case Study",
+    keywords: ["case study", "case analysis", "business case", "company case"],
+    docType: "case study",
+    targetLength: 4,
+    sections: [
+      T("Background", "paragraph", ["Situation and context", "Why it matters"]),
+      T("Key Problems & Findings", "groups", ["Problem with evidence", "Problem with evidence"]),
+      T("Analysis with Theory", "paragraph", ["Concepts that explain the case", "Interpretation"]),
+      T("Alternative Solutions", "comparison", ["Option with pros and cons", "Option with pros and cons"]),
+      T("Recommendation", "closing", ["Chosen solution", "Why it wins", "Next step"]),
+    ],
+  },
+  {
+    id: "technical-report",
+    label: "Technical / Business Report",
+    keywords: ["technical report", "business report", "progress report", "narrative report", "accomplishment report", "incident report", "field report", "practicum report", "ojt report", "ulat"],
+    docType: "technical report",
+    targetLength: 4,
+    sections: [
+      T("Introduction", "paragraph", ["Purpose and scope", "Background"]),
+      T("Methods & Data Gathered", "bullets", ["How data was gathered", "Sources used"]),
+      T("Findings", "table", ["Findings per row", "Figures or observations", "Patterns noticed"]),
+      T("Discussion", "paragraph", ["What the findings mean", "Comparison and implications"]),
+      T("Conclusions & Recommendations", "closing", ["Summary of conclusions", "Recommended actions"]),
+    ],
+  },
+  {
+    id: "reflection-gibbs",
+    label: "Reflection (Gibbs)",
+    keywords: ["reflective essay", "reflective journal", "learning journal", "reflection journal", "gibbs", "repleksyon", "pagninilay", "what so what now what", "reflection"],
+    docType: "reflection",
+    targetLength: 2,
+    sections: [
+      T("What Happened", "paragraph", ["Description of the experience", "Context and people involved"]),
+      T("Feelings & Evaluation", "paragraph", ["How it felt at the time", "What went well or poorly"]),
+      T("Analysis with Theory", "paragraph", ["Why it happened", "Concepts that explain it"]),
+      T("Lessons & Action Plan", "timeline", ["What was learned", "What to do differently", "Next steps"]),
+    ],
+  },
+  {
+    id: "narrative-essay",
+    label: "Narrative / Descriptive",
+    keywords: ["narrative essay", "descriptive essay", "short story", "maikling kwento", "anekdota", "pabula", "alamat", "personal narrative", "descriptive", "narrative"],
+    docType: "narrative essay",
+    targetLength: 2,
+    sections: [
+      T("Setting & Characters", "paragraph", ["Where and when", "Who is involved"]),
+      T("Events", "timeline", ["Opening event", "Turning point", "Resolution"]),
+      T("Ending & Reflection", "closing", ["How it ended", "What it means"]),
+    ],
+  },
+  {
+    id: "speech-talumpati",
+    label: "Speech / News / Poem",
+    keywords: ["speech", "talumpati", "declamation", "oration", "balita", "news article", "news report", "tula", "poem", "bugtong"],
+    docType: "speech",
+    targetLength: 1,
+    sections: [
+      T("Opening", "paragraph", ["Hook and greeting", "Topic in one line"]),
+      T("Message", "bullets", ["Key point with example", "Key point with example", "Strongest line"]),
+      T("Closing Call", "closing", ["Restated message", "Call to action"]),
+    ],
+  },
+  {
+    id: "syllabus",
+    label: "Syllabus / Course Outline",
+    keywords: ["syllabus", "course outline", "course syllabus", "subject outline"],
+    docType: "syllabus",
+    targetLength: 2,
+    sections: [
+      T("Course Description & Outcomes", "paragraph", ["What the course covers", "Learning outcomes"]),
+      T("Weekly Schedule", "table", ["Week and topic per row", "Activities", "Assessments"]),
+      T("Grading & Policies", "bullets", ["Grade breakdown", "Attendance and late work", "Classroom policies"]),
+    ],
+  },
+  {
+    id: "tos-rubric",
+    label: "TOS / Rubric",
+    keywords: ["table of specifications", "tos", "rubric", "scoring guide", "scoring rubric", "marking scheme", "pamantayan"],
+    docType: "rubric",
+    targetLength: 1,
+    sections: [
+      T("Coverage Map", "table", ["Topic per row", "Cognitive level", "Number of items"]),
+      T("Scoring Levels", "table", ["Criteria per row", "What each level looks like", "Points"]),
+      T("Notes for Raters", "bullets", ["How to use this guide", "Common pitfalls"]),
+    ],
+  },
+  {
+    id: "action-research-deped",
+    label: "Action Research (DepEd)",
+    keywords: ["action research", "classroom-based action research", "cbar", "berf"],
+    docType: "action research",
+    targetLength: 8,
+    sections: [
+      T("Context & Rationale", "paragraph", ["Problem and urgency with data", "Legal/curriculum basis"]),
+      T("Innovation & Intervention", "paragraph", ["What was implemented", "Dates and task assignments"]),
+      T("Research Questions", "bullets", ["Baseline question", "Intervention question", "Next-steps question"]),
+      T("Methods", "paragraph", ["Participants and setting", "Instruments and procedure"]),
+      T("Results & Discussion", "groups", ["Finding with evidence", "Finding with evidence"]),
+      T("Reflection", "paragraph", ["What worked", "What to improve"]),
+      T("Action Plan", "table", ["Objective per row", "Activities and persons", "Time frame"]),
+      T("Recommendations", "closing", ["Summary of conclusions", "Next actions"]),
+    ],
+  },
 ];
 
 function escapeRegExp(s: string): string {
@@ -160,20 +293,29 @@ function escapeRegExp(s: string): string {
 }
 
 /** Best keyword match for free text, or null. Word-boundary matching only —
- *  "example" must never match keyword "exam". Multi-word hits score higher. */
+ *  "example" must never match keyword "exam". Multi-word hits score higher.
+ *  Ties break toward the earliest mention (the head noun usually comes first:
+ *  "rubric for essay writing" is a rubric, not an essay). */
 export function matchTemplate(text: string | undefined | null): DocTemplate | null {
   if (!text) return null;
   const hay = text.toLowerCase();
   let best: DocTemplate | null = null;
   let bestScore = 0;
+  let bestIndex = Infinity;
   for (const t of TEMPLATES) {
     let score = 0;
+    let firstIndex = Infinity;
     for (const kw of t.keywords) {
       const re = new RegExp(`\\b${kw.split(/\s+/).map(escapeRegExp).join("\\s+")}\\b`);
-      if (re.test(hay)) score += kw.includes(" ") ? 3 : 1;
+      const m = re.exec(hay);
+      if (m) {
+        score += kw.includes(" ") ? 3 : 1;
+        if (m.index < firstIndex) firstIndex = m.index;
+      }
     }
-    if (score > bestScore) {
+    if (score > bestScore || (score === bestScore && score > 0 && firstIndex < bestIndex)) {
       bestScore = score;
+      bestIndex = firstIndex;
       best = t;
     }
   }

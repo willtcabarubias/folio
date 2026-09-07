@@ -3,6 +3,8 @@ import { AIError, MISSING_KEY_MESSAGE, generateStructured, isConfigured, type Ch
 import { MAX_CLARIFY_ROUNDS, THEME_UNSUPPORTED_MESSAGE, agentSystemPrompt, attachmentsToPromptText, hasContentRequest, isThemeChangeRequest } from "@/lib/ai/prompts";
 import { CONFIDENCE_THRESHOLD, computeConfidence } from "@/lib/ai/confidence";
 import { normalizeOutline, parseRequestedWords, sanitizeChatMessage } from "@/lib/spec/normalize";
+import { extractCoverHeader, headerToPromptText, isRemakeRequest, mergeHeader } from "@/lib/spec/intent";
+import { explicitRemovalTitles, mergeOutlinePreserving } from "@/lib/spec/patch";
 import { applyTemplateSkeleton, matchTemplate, templateBrief, type DocTemplate } from "@/lib/spec/templates";
 import { AgentResponseSchema, type AgentRequest, type AgentResponse, type Format, type Question } from "@/lib/spec/types";
 
@@ -233,6 +235,13 @@ export async function POST(req: Request) {
   if (textAtts.length) contextParts.push(`Attached source material:\n${attachmentsToPromptText(textAtts as any, ATTACHMENT_BUDGET)}`);
   if (imageAtts.length) contextParts.push(`Images attached (${imageAtts.length}): ${imageAtts.map((a) => a.name).join(", ")} — use vision to describe/OCR if needed.`);
   if (body.currentOutline) contextParts.push(`Current outline (source of truth, may include the user's manual edits):\n${JSON.stringify(body.currentOutline)}`);
+  // Sticky cover header: survives truncation — the model must keep it on the cover.
+  try {
+    const sticky = headerToPromptText(body.currentOutline?.header) || headerToPromptText(extractCoverHeader(messages[messages.length - 1]?.content ?? ""));
+    if (sticky && body.currentOutline) contextParts.push(sticky);
+  } catch {
+    /* sticky header is best-effort */
+  }
   if (contextParts.length) {
     const lastUser = convo.length - 1;
     convo[lastUser] = { role: "user", content: `${contextParts.join("\n\n")}\n\n---\nUser message:\n${(convo[lastUser].content as string)}` };
@@ -343,7 +352,7 @@ export async function POST(req: Request) {
         "Planner-force-clarify",
       );
     }
-    let response = finalize(result, body.preferredFormat, parsedWords, template, askedAnswered, lastUserRaw);
+    let response = finalize(result, body.preferredFormat, parsedWords, template, askedAnswered, lastUserRaw, body.currentOutline ?? null);
     // Suppression consumed every question: the model only repeated answered
     // dimensions. Force the outline (bounded, same pattern as the MAX path) —
     // never stall on the "tell me more" reply fallback.
@@ -365,14 +374,14 @@ export async function POST(req: Request) {
         ],
         "Planner-suppression-empty",
       );
-      response = finalize(result, body.preferredFormat, parsedWords, template, null, lastUserRaw);
+      response = finalize(result, body.preferredFormat, parsedWords, template, null, lastUserRaw, body.currentOutline ?? null);
     }
     if (themeIntent && contentIntent && response.kind === "outline") {
       response = { ...response, message: `${response.message} (Note: background/theme changes aren't supported yet — content updates applied.)` };
     }
     // Cover-only guard: retry once instead of silently returning a header-only doc.
-    // Respects retry budget; if budget exhausted, pad deterministically via normalize (no generic filler).
-    if (canRetry() && response.kind === "outline" && response.outline.lengthSource === "user" && response.outline.targetLength >= 2) {
+    // Applies to explicit AND inferred lengths — a cover with zero content sections is never valid.
+    if (canRetry() && response.kind === "outline") {
       const contentSections = response.outline.sections.filter((s) => s.layout !== "cover" && s.layout !== "agenda").length;
       if (contentSections === 0) {
         const retry = await doRetry(
@@ -386,7 +395,7 @@ export async function POST(req: Request) {
           ],
           "Planner-repair-cover-only",
         );
-        response = finalize(retry, body.preferredFormat, parsedWords, template, askedAnswered, lastUserRaw);
+        response = finalize(retry, body.preferredFormat, parsedWords, template, askedAnswered, lastUserRaw, body.currentOutline ?? null);
       }
     }
     return NextResponse.json(response);
@@ -406,6 +415,7 @@ export function finalize(
   template?: DocTemplate | null,
   askedAnswered?: AskedAnswered | null,
   lastUserText?: string,
+  currentOutline?: import("@/lib/spec/types").Outline | null,
 ): AgentResponse {
   const r = result as { kind: string; message: string; questions?: unknown[]; outline?: unknown };
   if (r.kind === "clarify") {
@@ -534,7 +544,35 @@ export function finalize(
     if (template && (o as { lengthSource?: string }).lengthSource !== "user" && !o.targetLength) {
       o.targetLength = template.targetLength;
     }
-    const outline = normalizeOutline(o);
+    // Deterministic cover-header restore: the LLM often drops Group/members,
+    // so re-derive from the user's own words and merge (explicit wins).
+    // Priority: saved header (base) <- LLM header <- words in this turn (highest).
+    try {
+      const fromUser = extractCoverHeader(lastUserText ?? "");
+      const fromLLM = (o as { header?: { group?: string; members?: string[] } }).header;
+      const base = !isRemakeRequest(lastUserText ?? "") ? currentOutline?.header : undefined;
+      const merged = mergeHeader(mergeHeader(base, fromLLM as never), fromUser as never);
+      if (merged) (o as { header?: unknown }).header = merged;
+    } catch {
+      /* header restore must never break planning */
+    }
+    let outline = normalizeOutline(o);
+    // Patch guard: when editing an existing file, never let a small follow-up
+    // ("put Group on top", "add X") wipe sections the model forgot to echo back.
+    // Only explicit remake language or a format switch allows a full rethink.
+    try {
+      const allowRemake = isRemakeRequest(lastUserText ?? "");
+      const formatSwitched = Boolean(currentOutline && o.format && currentOutline.format !== o.format);
+      if (currentOutline && !allowRemake && !formatSwitched) {
+        outline = mergeOutlinePreserving(currentOutline, outline, {
+          allowRemake: false,
+          formatSwitched: false,
+          explicitRemovals: explicitRemovalTitles(lastUserText ?? ""),
+        });
+      }
+    } catch {
+      /* merge must never break planning */
+    }
     // Pad-only skeleton enforcement: missing template sections are appended,
     // user customizations are never removed or reordered.
     if (template) {

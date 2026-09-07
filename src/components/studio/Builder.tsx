@@ -5,6 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Bot, Check, Loader2, MessageSquare, Paperclip, Pencil, ScanEye, Sparkles } from "lucide-react";
 import { ApiError, askAgent, downloadBlob, expandOutline, expandOutlineStream, extractFile, renderFile, renderPreview, reportApiError } from "@/lib/client/api";
 import type { AgentResponse, Attachment, ChatTurn, DocumentSpec, Format, Outline } from "@/lib/spec/types";
+import { extractCoverHeader, isHeaderOnlyRequest, isRemakeRequest, mergeHeader } from "@/lib/spec/intent";
+import { applySpecPatch, diffOutlines, explicitRemovalTitles, mergeOutlinePreserving } from "@/lib/spec/patch";
 
 import { getProject, newId, saveProject, type Project } from "@/lib/store/projects";
 import { ChatThread, type ThreadMessage } from "./ChatThread";
@@ -26,17 +28,18 @@ function isGreetingTitle(t: string): boolean {
 }
 
 function fingerprint(o: Outline): string {
-  return JSON.stringify([o.format, o.title, o.subtitle, o.docType, o.audience, o.tone, o.language, o.pageSize, o.targetLength, o.requestedWords ?? null, o.sections.map((s) => [s.title, s.layout, s.points])]);
+  return JSON.stringify([o.format, o.title, o.subtitle, o.header ?? null, o.docType, o.audience, o.tone, o.purpose ?? null, o.language, o.pageSize, o.targetLength, o.requestedWords ?? null, o.sections.map((s) => [s.title, s.layout, s.points])]);
 }
 
 function compactResponse(r: AgentResponse | undefined, text: string): string {
   if (!r) return JSON.stringify({ kind: "reply", message: text });
   if (r.kind === "outline") {
     const o = r.outline;
+    // Keep full context: purpose + header + pageSize must survive multi-turn edits.
     return JSON.stringify({
       kind: "outline",
       message: r.message,
-      outline: { title: o.title, subtitle: o.subtitle, format: o.format, docType: o.docType, audience: o.audience, tone: o.tone, language: o.language, targetLength: o.targetLength, lengthSource: o.lengthSource, requestedWords: o.requestedWords ?? null, sections: o.sections },
+      outline: { title: o.title, subtitle: o.subtitle, header: o.header ?? null, format: o.format, docType: o.docType, purpose: o.purpose ?? null, audience: o.audience, tone: o.tone, language: o.language, pageSize: o.pageSize, targetLength: o.targetLength, lengthSource: o.lengthSource, requestedWords: o.requestedWords ?? null, sections: o.sections },
     });
   }
   return JSON.stringify(r);
@@ -156,7 +159,9 @@ export function Builder({ id }: { id: string }) {
       outline: outline ?? undefined,
       spec: spec ?? undefined,
       messages: messages.filter((m) => !m.error).map(({ id: mid, role, text, response, answered, answers, attachedNames }) => ({ id: mid, role, text, response, answered, answers, attachedNames })),
-      attachments: allReadyAttachments.map(({ id: aid, name, size, kind, text, chars, pages }) => ({ id: aid, name, size, kind, text, chars, pages })),
+      // Persist vision dataUrls too (quota fallback in persist() lightens older projects).
+      // Without this, a reload loses the task image and the agent can no longer see it.
+      attachments: allReadyAttachments.map(({ id: aid, name, size, kind, text, chars, pages, dataUrl, mimeType, isImage }) => ({ id: aid, name, size, kind, text, chars, pages, ...(dataUrl ? { dataUrl, mimeType, isImage: true } : {}) })),
     }),
     [id, title, outline, spec, allReadyAttachments, messages, preferredFormat],
   );
@@ -301,10 +306,12 @@ export function Builder({ id }: { id: string }) {
     setGen({ status: "writing" });
     setTab("preview");
     setPane("doc");
-    // Create skeleton spec so preview shows immediately and streams cards
+    // Create skeleton spec so preview shows immediately and streams cards.
+    // Full-regenerate path only — partial edits use doGenerateSections and never wipe.
     const skeleton: DocumentSpec = {
       title: target.title,
       subtitle: target.subtitle,
+      header: target.header,
       docType: target.docType,
       purpose: target.purpose,
       audience: target.audience,
@@ -332,7 +339,7 @@ export function Builder({ id }: { id: string }) {
           // Bulletproof streaming: key by id in a Map, never store undefined holes.
           // Out-of-order or duplicate events can't crash EditablePreview.
           const incoming = evt.block as DocumentSpec["blocks"][number];
-          if (!incoming || typeof incoming.id !== "string" || !incoming.id) return;
+          if (!incoming || typeof incoming.id !== "string" || !incoming.id) continue;
           // Sanitize minimal shape (writer may omit bullets/title).
           const safe = {
             ...incoming,
@@ -359,8 +366,9 @@ export function Builder({ id }: { id: string }) {
             return { ...base, blocks: ordered } as DocumentSpec;
           });
         } else if (evt.type === "done") {
-          finalSpec = evt.spec;
-          warnings = evt.warnings;
+          if ("partial" in evt && (evt as { partial?: boolean }).partial) continue;
+          finalSpec = (evt as { spec: DocumentSpec }).spec;
+          warnings = (evt as { warnings: string[] }).warnings;
         }
       }
       if (!finalSpec) throw new Error("Generation ended without result");
@@ -400,6 +408,103 @@ export function Builder({ id }: { id: string }) {
     doGenerateRef.current = doGenerate;
   }, [doGenerate]);
 
+  /**
+   * Patch path: (re)write ONLY the given section ids and merge into the live spec.
+   * Untouched blocks are never wiped, never re-rendered by the LLM — this is what
+   * makes "add X / remove Y / add 2 pages" reliable and cheap.
+   */
+  const doGenerateSections = useCallback(async (targetOutline: Outline, sectionIds: string[], transcriptOverride?: ChatTurn[]) => {
+    if (!sectionIds.length) return;
+    const tr = transcriptOverride ?? transcript;
+    const prevSpec = spec;
+    setGen({ status: "writing" });
+    try {
+      const incomingById = new Map<string, DocumentSpec["blocks"][number]>();
+      let warnings: string[] = [];
+      for await (const evt of expandOutlineStream({
+        outline: targetOutline,
+        transcript: tr,
+        attachments: allReadyAttachments.map((a) => ({ name: a.name, text: a.text, ...(a.dataUrl ? { dataUrl: a.dataUrl, mimeType: a.mimeType, isImage: true } : {}) })),
+        sectionIds,
+      } as Parameters<typeof expandOutlineStream>[0])) {
+        if (evt.type === "block") {
+          const incoming = evt.block as DocumentSpec["blocks"][number];
+          if (!incoming || typeof incoming.id !== "string" || !incoming.id) continue;
+          const safe = {
+            ...incoming,
+            title: typeof incoming.title === "string" && incoming.title.trim() ? incoming.title : "Untitled",
+            bullets: Array.isArray(incoming.bullets) ? incoming.bullets : [],
+          } as DocumentSpec["blocks"][number];
+          incomingById.set(safe.id, safe);
+          // Live-merge each streamed block so the UI updates without wiping others.
+          setSpec((prev) => {
+            if (!prev) return prev;
+            const byId = new Map(prev.blocks.map((b) => [b.id, b]));
+            byId.set(safe.id, safe);
+            const ordered: DocumentSpec["blocks"][number][] = [];
+            for (const s of targetOutline.sections) {
+              const hit = byId.get(s.id);
+              if (hit) {
+                ordered.push(hit);
+                byId.delete(s.id);
+              }
+            }
+            for (const rest of byId.values()) {
+              if (!ordered.some((x) => x.id === rest.id)) ordered.push(rest);
+            }
+            return { ...prev, header: targetOutline.header, blocks: ordered };
+          });
+        } else if (evt.type === "done") {
+          warnings = (evt as { warnings: string[] }).warnings ?? [];
+          const partialBlocks = (evt as { blocks?: DocumentSpec["blocks"] }).blocks;
+          if (partialBlocks?.length) {
+            for (const b of partialBlocks) if (b?.id) incomingById.set(b.id, b);
+          }
+        }
+      }
+      if (!incomingById.size) throw new Error("Update ended without result — keeping your current file");
+      // Final authoritative merge (handles removals + order).
+      const fresh = targetOutline.sections
+        .map((s) => incomingById.get(s.id))
+        .filter((b): b is DocumentSpec["blocks"][number] => Boolean(b));
+      setSpec((prev) => {
+        const base = prev ?? prevSpec;
+        if (!base) return base;
+        // Drop blocks whose sections were explicitly removed; keep everything else.
+        const wanted = new Set(targetOutline.sections.map((s) => s.id));
+        const kept = base.blocks.filter((b) => wanted.has(b.id) || incomingById.has(b.id));
+        const merged = applySpecPatch({ ...base, blocks: kept }, fresh, targetOutline.header);
+        // Re-order to outline order.
+        const byId = new Map(merged.blocks.map((b) => [b.id, b]));
+        const ordered: DocumentSpec["blocks"][number][] = [];
+        for (const s of targetOutline.sections) {
+          const hit = byId.get(s.id);
+          if (hit) {
+            ordered.push(hit);
+            byId.delete(s.id);
+          }
+        }
+        for (const rest of byId.values()) ordered.push(rest);
+        return { ...merged, header: targetOutline.header, blocks: ordered };
+      });
+      specKey.current = fingerprint(targetOutline);
+      setGen({ status: "rendering" });
+      const cur = spec;
+      void cur;
+      // Preview from merged spec (read fresh in next tick via effect below).
+      setNeedsPreview(true);
+      setGen({ status: "ready", warnings });
+      showToast("Updated — rest of the file untouched");
+    } catch (err) {
+      reportApiError(err, "Update failed", "api:expand");
+      setGen({ status: "error", message: err instanceof Error ? err.message : "Update failed" });
+      showToast(err instanceof Error ? err.message : "Update failed");
+    }
+  }, [transcript, allReadyAttachments, spec]);
+  useEffect(() => {
+    doGenerateRef.current = doGenerate;
+  }, [doGenerate]);
+
   // (settings removed — no bounce needed)
 
   const generate = async () => {
@@ -417,6 +522,24 @@ export function Builder({ id }: { id: string }) {
 
   const runAgent = useCallback(
     async (list: ThreadMessage[], currentOutline: Outline | null, files: Attachment[], preferred: Format | "auto") => {
+      // Pre-agent fast path: pure cover-header edits apply instantly with zero LLM cost
+      // and zero regeneration risk. The planner is bypassed entirely.
+      const _lastUser = list.filter((m) => !m.error).slice(-1).find((m) => m.role === "user")?.text ?? "";
+      if (currentOutline && spec && isHeaderOnlyRequest(_lastUser) && !isRemakeRequest(_lastUser)) {
+        const fromUser = extractCoverHeader(_lastUser);
+        if (fromUser && (fromUser.group || fromUser.members?.length)) {
+          const mergedH = mergeHeader(currentOutline.header, fromUser);
+          const patched = { ...currentOutline, ...(mergedH ? { header: mergedH } : {}) };
+          setOutlineState(patched);
+          setSpec((prev) => (prev ? { ...prev, header: patched.header } : prev));
+          setNeedsPreview(true);
+          specKey.current = fingerprint(patched);
+          const label = [mergedH?.group, mergedH?.subject, mergedH?.section, mergedH?.members?.length ? `${mergedH.members.length} member${mergedH.members.length > 1 ? "s" : ""}` : ""].filter(Boolean).join(" · ");
+          setMessages((prev) => [...prev, { id: newId("m"), role: "assistant", text: `Done — cover header updated${label ? ` (${label})` : ""}. Nothing else changed.` }]);
+          showToast("Header updated — content untouched");
+          return;
+        }
+      }
       setBusy(true);
       try {
         const response = await askAgent({
@@ -426,39 +549,108 @@ export function Builder({ id }: { id: string }) {
           preferredFormat: preferred,
         });
         if (response.kind === "outline") {
-          // Smart title sync: only auto-update title if user hasn't manually edited, or they asked to rename, or current title is greeting/empty
           const lastUserText = list.filter((m) => m.role === "user").slice(-1)[0]?.text ?? "";
           const userAskedTitleChange = /title|rename|headline|call it|name it/i.test(lastUserText);
-          setOutlineState(response.outline);
+          const allowRemake = isRemakeRequest(lastUserText);
+          const formatSwitched = Boolean(currentOutline && response.outline.format !== currentOutline.format);
+          // Deterministic header restore on the client too (instant, no round-trip).
+          // Priority: saved header <- LLM header <- words in this turn.
+          let planned: Outline = response.outline;
+          try {
+            const fromUser = extractCoverHeader(lastUserText);
+            const mergedH = mergeHeader(mergeHeader(currentOutline?.header && !allowRemake ? currentOutline.header : undefined, planned.header), fromUser);
+            planned = { ...planned, ...(mergedH ? { header: mergedH } : {}) };
+            if (currentOutline && !allowRemake && !formatSwitched) {
+              planned = mergeOutlinePreserving(currentOutline, planned, {
+                allowRemake: false,
+                formatSwitched: false,
+                explicitRemovals: explicitRemovalTitles(lastUserText),
+              });
+            }
+          } catch {
+            planned = response.outline;
+          }
+          const finalResponse: AgentResponse = planned !== response.outline ? { ...response, outline: planned } : response;
+          setOutlineState(planned);
           setTitle((t) => {
             const cur = t.trim();
-            if (!isUserEdited.current || !cur || isGreetingTitle(cur) || userAskedTitleChange) return response.outline.title;
+            if (!isUserEdited.current || !cur || isGreetingTitle(cur) || userAskedTitleChange) return planned.title;
             return t;
           });
-          setPreferredFormat(response.outline.format);
+          setPreferredFormat(planned.format);
 
           // After answers, directly create file and redirect to preview (no outline phase)
           const interimId = newId("m");
-          const interimText = `${response.message} — Composing…`;
-          const interimResponse: AgentResponse = { ...response, message: interimText } as AgentResponse;
+          const isPatch = Boolean(currentOutline && spec && !allowRemake && !formatSwitched);
+          const interimText = isPatch ? `${finalResponse.message} — Updating…` : `${finalResponse.message} — Composing…`;
+          const interimResponse: AgentResponse = { ...finalResponse, message: interimText } as AgentResponse;
           const interimMsg: ThreadMessage = { id: interimId, role: "assistant", text: interimText, response: interimResponse };
           setMessages((prev) => [...prev, interimMsg]);
           setPane("doc");
           setTab("preview");
           const updatedTranscript: ChatTurn[] = [
             ...list.filter((m) => !m.error).map((m) => ({ role: m.role as "user" | "assistant", content: m.role === "assistant" ? compactResponse(m.response, m.text) : m.text })),
-            { role: "assistant" as const, content: response.message },
+            { role: "assistant" as const, content: finalResponse.message },
           ];
+
+          const finishOk = (msg: string, resp: AgentResponse) =>
+            setMessages((prev) => prev.map((m) => (m.id === interimId ? { id: interimId, role: "assistant", text: msg, response: resp } : m)));
+          const finishFail = (msg: string, resp: AgentResponse) =>
+            setMessages((prev) => prev.map((m) => (m.id === interimId ? { id: interimId, role: "assistant", text: msg, response: resp } : m)));
+
+          // Fast path 1: header-only ("put Group 1 + names on top") — no regeneration at all.
+          const _diff0 = currentOutline ? diffOutlines(currentOutline, planned) : null;
+          const _headerOnly = Boolean(_diff0 && (isHeaderOnlyRequest(lastUserText) || (!allowRemake && !_diff0.added.length && !_diff0.removed.length && !_diff0.changed.length && _diff0.headerChanged)));
+          if (currentOutline && spec && _headerOnly) {
+            setSpec((prev) => (prev ? { ...prev, header: planned.header, title: planned.title } : prev));
+            setNeedsPreview(true);
+            specKey.current = fingerprint(planned);
+            showToast("Header updated — content untouched");
+            finishOk(finalResponse.message, finalResponse);
+            return;
+          }
+
           if (generating || previewBusy) {
-            autoGenPending.current = { outline: response.outline, transcript: updatedTranscript, interimId, response };
+            autoGenPending.current = { outline: planned, transcript: updatedTranscript, interimId, response: finalResponse };
             showToast("Queued");
-          } else {
-            showToast("Composing");
+          } else if (!currentOutline || !spec || allowRemake || formatSwitched) {
+            showToast(allowRemake ? "Remaking file…" : "Composing");
             try {
-              await doGenerate(response.outline, updatedTranscript);
-              setMessages((prev) => prev.map((m) => (m.id === interimId ? { id: interimId, role: "assistant", text: response.message, response } : m)));
+              await doGenerate(planned, updatedTranscript);
+              finishOk(finalResponse.message, finalResponse);
             } catch {
-              setMessages((prev) => prev.map((m) => (m.id === interimId ? { id: interimId, role: "assistant", text: `${response.message} — generation failed, please retry`, response } : m)));
+              finishFail(`${finalResponse.message} — generation failed, please retry`, finalResponse);
+            }
+          } else {
+            // Patch path: diff old vs new, only (re)write what changed.
+            const diff = diffOutlines(currentOutline, planned);
+            const touchedIds = [...diff.added.map((s) => s.id), ...diff.changed.map((c) => c.next.id)];
+            const totalSections = Math.max(1, planned.sections.length);
+            const isBigChange = diff.keptRatio < 0.5 || touchedIds.length > 6 || touchedIds.length / totalSections > 0.5;
+            if (!diff.added.length && !diff.changed.length) {
+              // Header/title/removal-only (or no-op): filter locally, no LLM expand call.
+              const wanted = new Set(planned.sections.map((s) => s.id));
+              setSpec((prev) => (prev ? { ...prev, header: planned.header, title: planned.title, blocks: prev.blocks.filter((b) => wanted.has(b.id)) } : prev));
+              setNeedsPreview(true);
+              specKey.current = fingerprint(planned);
+              showToast(diff.removed.length ? "Removed — rest untouched" : "Updated — content untouched");
+              finishOk(finalResponse.message, finalResponse);
+            } else if (isBigChange) {
+              showToast("Composing");
+              try {
+                await doGenerate(planned, updatedTranscript);
+                finishOk(finalResponse.message, finalResponse);
+              } catch {
+                finishFail(`${finalResponse.message} — generation failed, please retry`, finalResponse);
+              }
+            } else {
+              showToast("Updating…");
+              try {
+                await doGenerateSections(planned, touchedIds, updatedTranscript);
+                finishOk(finalResponse.message, finalResponse);
+              } catch {
+                finishFail(`${finalResponse.message} — update failed, please retry`, finalResponse);
+              }
             }
           }
         } else {
@@ -475,7 +667,7 @@ export function Builder({ id }: { id: string }) {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [spec, generating, previewBusy, doGenerate],
+    [spec, generating, previewBusy, doGenerate, doGenerateSections],
   );
 
   // Kick off the planner when arriving from the home page (last message is the user's, unanswered).
@@ -547,7 +739,7 @@ export function Builder({ id }: { id: string }) {
       if (isUserEdited.current) return t || outline?.title || spec.title;
       return outline?.title || t || spec.title;
     })();
-    return { ...spec, title: effectiveTitle, pageSize: outline?.pageSize ?? spec.pageSize };
+    return { ...spec, title: effectiveTitle, header: outline?.header ?? spec.header, pageSize: outline?.pageSize ?? spec.pageSize };
   };
 
   const exportAs = async (kind: ExportKind) => {

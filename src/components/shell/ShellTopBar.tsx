@@ -3,8 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { Award, Bell, Bug, FolderOpen, Inbox, LogOut, Menu, NotebookPen, Plus, Search, Settings, Sparkles, UserRound, X } from "lucide-react";
-import { useErrorLog } from "@/lib/error/store";
+import { Award, Bell, FolderOpen, Inbox, LogOut, Menu, NotebookPen, Plus, Search, Settings, Sparkles, UserRound, X } from "lucide-react";
 import { SearchPalette } from "./SearchPalette";
 import { Tooltip } from "./Tooltip";
 import { NoteDialog } from "@/components/notes/NoteDialog";
@@ -110,7 +109,6 @@ export function ShellTopBar() {
     };
   }, [notifOpen, plusOpen]);
 
-  const { errors, hasUnread: hasErrorUnread, open: openErrorLog } = useErrorLog();
   const hasNotifications = MOCK_NOTIFICATIONS.length > 0;
   const unread = MOCK_NOTIFICATIONS.filter((n) => !n.read).length;
 
@@ -128,20 +126,6 @@ export function ShellTopBar() {
 
         {/* Desktop actions — Settings moved to Sidebar, keep Search here */}
         <div className="hidden shrink-0 items-center gap-1 md:flex md:gap-1.5">
-          <Tooltip label={errors.length ? `${errors.length} error${errors.length > 1 ? "s" : ""} — open log` : "Error log"}>
-            <button
-              type="button"
-              onClick={openErrorLog}
-              aria-label={errors.length ? `Open error log, ${errors.length} errors` : "Open error log"}
-              className={`relative flex h-9 w-9 items-center justify-center rounded-full transition md:h-[32px] md:w-[32px] ${hasErrorUnread ? "bg-red-600 text-white hover:bg-red-700" : errors.length ? "bg-white text-ink ring-1 ring-line hover:bg-slate-50" : "text-muted hover:bg-white/60 hover:text-ink"}`}
-            >
-              <Bug size={17} strokeWidth={1.9} className="md:h-[15px] md:w-[15px]" />
-              {errors.length > 0 ? (
-                <span className="absolute -right-0.5 -top-0.5 flex min-h-[16px] min-w-[16px] items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-white">{errors.length > 99 ? "99+" : errors.length}</span>
-              ) : null}
-            </button>
-          </Tooltip>
-
           <Tooltip label="Search">
             <button
               type="button"

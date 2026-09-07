@@ -80,7 +80,7 @@ ${opts.answeredSummary ? `- Already answered (authoritative — trust this over 
 - Replies must never claim a file was created or changed. kind "reply" is words only — no outline, no document, no design change happened. If the user asked for a file change, return the outline (or clarify), never a "Done" message.
 - If the request already contains enough to produce a strong result AND format and length are both known (or rounds are exhausted) → return the outline. Phrases like "just do it", "you decide", "surprise me", "use defaults", or "skip" apply the recommended options for the current round — they never waive a still-missing format/length, and a low score only forces another question when the topic is thin and no focus was answered yet. Do not ask a second round unless answers created genuine new ambiguity.
 ${mustOutline ? '- You have used all clarification rounds. You MUST return kind "outline" now using sensible defaults for anything unknown.' : `- Clarification rounds remaining: ${roundsLeft}.`}
-${opts.hasOutline ? '- An outline already exists (see "Current outline"). The user may have edited it by hand or changed settings (format, length, page size, audience) — treat that version as the source of truth and preserve its targetLength and lengthSource unless the user asks to change the length. When they ask for changes, return the FULL updated outline with kind "outline", apply the change precisely, keep everything else intact, and keep section ids stable where the section survives. If they merely ask a question about it, use kind "reply".' : ""}
+${opts.hasOutline ? '- An outline already exists (see "Current outline"). The user may have edited it by hand or changed settings (format, length, page size, audience) — treat that version as the source of truth and preserve its targetLength and lengthSource unless the user asks to change the length. When they ask for changes, return the FULL updated outline with kind "outline", apply the change precisely, keep everything else intact, and keep section ids stable where the section survives. If they merely ask a question about it, use kind "reply".\n- Cover header rule (Group + members + subject + section): when the user gives a group label, member names, subject (e.g. Science) or section (e.g. 7-Ruby), put them ONLY in outline.header {group, members, subject, section} so they render on the COVER ONLY. Never put member names in subtitle or section bullets. When none are given, omit header entirely.\n- Edit, never remake: a follow-up like "add X / remove Y / put Group on top / add more pages" is a PATCH — change only the named sections/header and return everything else byte-identical (same ids, titles, order). Only when the user explicitly says remake / rebuild from scratch / start over / regenerate everything may you rethink the whole structure.' : ""}
 ${opts.hasAttachments ? "- Attached files are provided. Treat them as the primary source: base the topic, facts and structure on them and mention in your message that you used them. For a resume/CV built from an attached CV, reuse the person's real roles, dates, schools and skills." : ""}
 ${opts.hasAttachments ? `- When file(s) attached and user intent is vague (e.g., "explain this", "what is this", "describe this", "identify what's wrong", "review this proposal", "summarize", "what does this say", "critique", "extract", "find issues") without explicit format/focus/audience/length, you MUST return kind "clarify" in a **single turn** (combine, never split). Do NOT explain the file inline — we are a document generator: convert to a document.
   **Single-turn composition — substantive first, format second-last, length last (max 3-4 questions):**
@@ -99,6 +99,7 @@ ${opts.preferredFormat && opts.preferredFormat !== "auto" ? `- The user pre-sele
 {
  "title": "<specific, compelling title — for a resume or letter this is the person's name>",
  "subtitle": "<one line, optional — for a resume the target role/headline>",
+ "header": {"group": "<e.g. Group 1, optional — cover ONLY>", "members": ["<member name>", "... up to 8, cover ONLY>"], "subject": "<e.g. Science, optional — cover ONLY>", "section": "<e.g. 7-Ruby, optional — cover ONLY>"},
  "format": "pptx" | "docx" | "pdf",
  "docType": "<resume | cover letter | pitch deck | lecture | lesson plan | report | essay | proposal | study guide | one-pager | memo | business plan | newsletter | ...>",
  "purpose": "<school | work | personal> — <one-line goal>",
@@ -149,6 +150,16 @@ cover, agenda, section, bullets, two-column, stats, quote, timeline, comparison,
 - Lab / investigatory report: cover → aim & hypothesis (paragraph) → methodology (timeline) → results (table) → discussion (paragraph) → conclusion (closing).
 - Study guide: cover → overview (paragraph) → key concepts (bullets/two-column) → summary tables/timeline → quiz (quiz) for review.
 - One-pager / fact sheet: cover (points = date, contact) → context or problem → key facts (stats or bullets) → how it works (timeline or two-column) → "Next steps" (bullets, not a conclusion).
+- Classroom / group activity: task overview (paragraph) → tasks (timeline) → guide questions (bullets) → scoring guide (table). Cover header carries Group + members + subject + section.
+- Position paper: background (paragraph) → stand/thesis (paragraph) → supporting arguments (bullets) → counterarguments vs rebuttal (comparison) → conclusion (closing).
+- Case study: background (paragraph) → key problems/findings (groups) → analysis with theory (paragraph) → alternatives (comparison) → recommendation (closing).
+- Technical / business / narrative report: introduction (paragraph) → methods/data (bullets) → findings (table) → discussion (paragraph) → conclusions & recommendations (closing).
+- Reflection (Gibbs): what happened (paragraph) → feelings & evaluation (paragraph) → analysis with theory (paragraph) → lessons & action plan (timeline). No conclusion, first person "I" allowed.
+- Narrative / descriptive: setting & characters (paragraph) → events (timeline) → ending (closing).
+- Speech / news / poem: opening/lead (paragraph) → message/details (bullets) → closing call (closing). One page.
+- Syllabus: description & outcomes (paragraph) → weekly schedule (table) → grading & policies (bullets).
+- TOS / rubric: coverage map (table) → scoring levels (table) → rater notes (bullets). One page, no conclusion.
+- Action research (DepEd): context & rationale (paragraph) → innovation/intervention (paragraph) → research questions (bullets) → methods (paragraph) → results (groups) → reflection (paragraph) → action plan (table: objectives/activities/persons/timeframe) → recommendations (closing).
 - Pitch deck: cover → problem → solution → product → market (stats) → business model → traction → competition (comparison or table) → team → financials / the ask (closing).
 - Business plan: cover → executive summary (paragraph) → company & offering (paragraph) → market analysis (stats) → products/services (bullets or groups) → strategy & milestones (timeline) → financials (table) → funding ask (closing). 6–12 pages.
 - Invoice: compact header block (invoice number, date, bill-to, due date as header bullets — never a cover page) → line items (table: description, qty, rate, amount) → totals (stats: subtotal, tax, total due) → payment terms (bullets). One page.
@@ -157,7 +168,7 @@ cover, agenda, section, bullets, two-column, stats, quote, timeline, comparison,
 Section titles must be specific and informative ("Fusion: How the Sun Makes Energy", not "Overview"). Points are concrete, non-overlapping, 2–5 per section, and together fully cover the topic at the requested depth. Do not include a "designNotes" field.
 
 ## Creative freedom (standard-format-first)
-School templates above cover common cases, but you are NOT limited to them. When the request names a document type with no template (invoice, business plan, contract, certificate, program, menu, etc.), compose its real-world industry-standard structure from your own knowledge — required sections, in the conventional order, with the natural layout per section (tables for line items, timelines for processes, groups for entries). Stay inside the Layouts vocabulary and the length rules; keep the tone professional. A correct standard format you compose beats a generic essay shape every time.`;
+School templates above cover common cases, but you are NOT limited to them. When the request names a document type with no template (business plan, contract, certificate, program, minutes, memo, announcement, portfolio, etc.), compose its real-world standard format in 4 steps: 1) detect domain (school / business / personal) and formality from purpose + audience + tone; 2) recall that format's real-world required sections in conventional order (school activity → task list + scoring; admin → background → activities → outcomes; formal → title → body → sign-off); 3) map each part to the closest layout (rows×columns of facts → table; process/chronology → timeline; A-vs-B → comparison; entries with own headings → groups; figures → stats; prose → paragraph; bullets ONLY for genuine lists); 4) vary shapes — never three same-layout sections in a row, never redundant bullets restating another section. Stay inside the Layouts vocabulary and the length rules; keep the tone professional. A correct standard format you compose beats a generic essay shape every time.`;
 }
 
 export function expandSystemPrompt(outline: Outline, designRef?: { ornament?: string; bulletStyle?: string; themeId?: string; mood?: string }): string {
@@ -175,6 +186,7 @@ export function expandSystemPrompt(outline: Outline, designRef?: { ornament?: st
 ## Source fidelity — highest priority
 - Hierarchy: 1) image vision task ("follow the task from the img") + attached source files verbatim > 2) user transcript answers > 3) outline sections/ids/order/titles. Never invent sections, titles, takeaways, or "putting into practice" blocks.
 - Exactly one block per requested section, same order, same "id", same title wording (fix typos only). If a section id is unclear, use blockFromOutline fallback content — do not create new ids like topup1.
+- Cover header (Group/members) is rendered by the engine on the cover only — never copy it into body bullets, tables, or subtitles.
 - When source material is provided, stay faithful to it and prioritise its facts; do not contradict it. Transcribe tables/figures from the image faithfully (headers + rows exact).
 - Do NOT add closing/takeaways/callout/recommendation unless the outline already contains a closing section with that intent. An empty last page is better than an invented takeaway.
 
@@ -260,9 +272,13 @@ ${
 export function outlineToPromptText(outline: Outline, sections: OutlineSection[]): string {
   const budgets = sectionBudgets(outline);
   const isDeck = outline.format === "pptx";
+  const headerLine = outline.header?.group || outline.header?.members?.length || outline.header?.subject || outline.header?.section
+    ? `Cover header (COVER ONLY — do not repeat in body): ${[outline.header.group, outline.header.members?.join(" · "), outline.header.subject, outline.header.section].filter(Boolean).join(" | ")}`
+    : null;
   const meta = [
     `Title: ${outline.title}`,
     outline.subtitle ? `Subtitle: ${outline.subtitle}` : null,
+    headerLine,
     `Format: ${outline.format}`,
     `Document type: ${outline.docType}`,
     outline.purpose ? `Purpose: ${outline.purpose}` : null,

@@ -257,6 +257,15 @@ function coverPage(ctx: Ctx, spec: DocumentSpec, b: Block | undefined): (Paragra
     rows: [new TableRow({ children: pillRowCells })],
   });
   const out: (Paragraph | Table)[] = [header, titlePara, pillTable, spacer(ctx, 400)];
+  // Cover-only header: Group + members centered under the pills.
+  {
+    const hg = spec.header?.group?.trim();
+    const hm = (spec.header?.members ?? []).filter(Boolean).slice(0, 8);
+    const hs = [spec.header?.subject?.trim(), spec.header?.section?.trim()].filter(Boolean).join(" · ");
+    if (hg) out.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [run(ctx, hg, { bold: true, size: 10, caps: true, spacing: 30 })], spacing: { before: 120, after: hm.length || hs ? 40 : 120 } }));
+    if (hs) out.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [run(ctx, hs, { size: 9, color: ctx.c.muted })], spacing: { before: 0, after: hm.length ? 40 : 120 } }));
+    if (hm.length) out.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [run(ctx, hm.join("  ·  "), { size: 9, color: ctx.c.muted })], spacing: { before: 0, after: 120 } }));
+  }
   // optional body as centered abstract
   if (b?.body) {
     out.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [run(ctx, b.body.replace(/\n+/g, " "), { size: 9, color: ctx.c.muted })], spacing: { before: 200, after: 200 } }));
@@ -302,6 +311,13 @@ function compactHeader(ctx: Ctx, spec: DocumentSpec, b: Block | undefined): (Par
     spacing: { before: 120, after: subtitle ? 60 : 40 },
   });
   const out: (Paragraph | Table)[] = [header, titlePara];
+  // Cover-only header: Group + members print here, never in body blocks.
+  const hg = spec.header?.group?.trim();
+  const hm = (spec.header?.members ?? []).filter(Boolean).slice(0, 8);
+  const hs = [spec.header?.subject?.trim(), spec.header?.section?.trim()].filter(Boolean).join(" · ");
+  if (hg) out.push(para(ctx, [run(ctx, hg, { bold: true, size: 10, caps: true, spacing: 30 })], { after: hm.length || hs ? 20 : 60 }));
+  if (hs) out.push(para(ctx, [run(ctx, hs, { size: 9, color: ctx.c.muted })], { after: hm.length ? 20 : 60 }));
+  if (hm.length) out.push(para(ctx, [run(ctx, hm.join("  ·  "), { size: 9, color: ctx.c.muted })], { after: 60 }));
   if (subtitle) {
     out.push(para(ctx, [run(ctx, subtitle, { italic: true, color: ctx.c.muted, size: 11 })], { after: 80 }));
   } else {

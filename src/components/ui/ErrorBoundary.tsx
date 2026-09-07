@@ -29,10 +29,10 @@ export class ErrorBoundary extends React.Component<Props, State> {
     if (this.state.hasError) {
       return (
         <div className="flex min-h-[240px] flex-col items-center justify-center gap-3 p-8 text-center">
-          <p className="text-sm font-semibold text-ink">Something broke while rendering</p>
-          <p className="max-w-md text-xs leading-5 text-muted">The error was captured in the error log (bug icon top-right). You can continue by reloading.</p>
+          <p className="text-sm font-semibold text-ink">Something didn&apos;t go as planned</p>
+          <p className="max-w-md text-xs leading-5 text-muted">Don&apos;t worry — your work is safe. Please reload to try again, and contact the developer if it keeps happening.</p>
           <button type="button" onClick={() => window.location.reload()} className="btn-primary">
-            Reload
+            Try again
           </button>
         </div>
       );

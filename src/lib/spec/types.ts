@@ -183,9 +183,53 @@ export const OutlineSectionSchema = z.object({
 });
 export type OutlineSection = { id: string; title: string; layout: Layout; points: string[] };
 
+/* ------------------------------------------------------------------ */
+/*  Cover-only header (Group + members)                                 */
+/*                                                                      */
+/*  Rendered ONLY on the cover (first page / first slide). Never in    */
+/*  body bullets, never repeated on later pages. This gives the agent  */
+/*  a dedicated place for "put Group 1 + names on top" so it no longer */
+/*  has to guess subtitle vs cover.points.                              */
+/* ------------------------------------------------------------------ */
+
+const membersList = z.preprocess((v) => {
+  if (v === null || v === undefined) return undefined;
+  const arr = Array.isArray(v) ? v : typeof v === "string" ? v.split(/\n+/) : [];
+  const cleaned = (arr as unknown[])
+    .map((x) => (typeof x === "string" ? x.trim() : String(x ?? "").trim()))
+    .filter(Boolean)
+    .slice(0, 8);
+  return cleaned.length ? cleaned : undefined;
+}, z.array(z.string().max(80)).max(8).optional());
+
+export const CoverHeaderSchema = z.object({
+  group: z.preprocess((v) => {
+    if (v === null || v === undefined) return undefined;
+    if (typeof v !== "string") return String(v);
+    const t = v.trim();
+    return t ? t.slice(0, 60) : undefined;
+  }, z.string().max(60).optional()),
+  members: membersList,
+  subject: z.preprocess((v) => {
+    if (v === null || v === undefined) return undefined;
+    if (typeof v !== "string") return String(v);
+    const t = v.trim();
+    return t ? t.slice(0, 60) : undefined;
+  }, z.string().max(60).optional()),
+  section: z.preprocess((v) => {
+    if (v === null || v === undefined) return undefined;
+    if (typeof v !== "string") return String(v);
+    const t = v.trim();
+    return t ? t.slice(0, 60) : undefined;
+  }, z.string().max(60).optional()),
+});
+
+export type CoverHeader = { group?: string; members?: string[]; subject?: string; section?: string };
+
 export const OutlineSchema = z.object({
   title: str,
   subtitle: optStr,
+  header: CoverHeaderSchema.optional(),
   format: formatEnum,
   docType: optStr,
   purpose: optStr,
@@ -204,6 +248,8 @@ export const OutlineSchema = z.object({
 export type Outline = {
   title: string;
   subtitle?: string;
+  /** Cover-only header: Group + member names. Rendered on cover only, never in body. */
+  header?: CoverHeader;
   format: Format;
   docType: string;
   purpose?: string;
@@ -396,6 +442,8 @@ export type FitInfo = {
 export type DocumentSpec = {
   title: string;
   subtitle?: string;
+  /** Cover-only header: Group + member names. Rendered on cover only. */
+  header?: CoverHeader;
   docType: string;
   purpose?: string;
   audience?: string;
@@ -454,6 +502,8 @@ export type ExpandRequest = {
   outline: Outline;
   transcript: ChatTurn[];
   attachments?: { name: string; text: string; dataUrl?: string; mimeType?: string; isImage?: boolean }[];
+  /** Partial expand: only write these section ids, client merges into existing spec. */
+  sectionIds?: string[];
 };
 
 export type RenderRequest = {

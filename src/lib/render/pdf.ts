@@ -565,6 +565,24 @@ function coverPage(L: Layout, spec: DocumentSpec, b: Block | undefined) {
   }
   // subtle abstract below pills if present (optional, not in ref but keep for docs)
   let afterY = pillY + pillH + 24;
+  // Cover-only header: Group + members centered under the pills.
+  {
+    const hg = (spec.header?.group || "").trim();
+    const hm = (spec.header?.members ?? []).filter(Boolean).slice(0, 8);
+    const hs = [(spec.header?.subject || "").trim(), (spec.header?.section || "").trim()].filter(Boolean).join(" · ");
+    if (hg) {
+      L.write(pdfText(hg).toUpperCase(), L.left, afterY, L.cw, { size: 8, color: L.c.text, font: L.f.bold, align: "center", spacing: 0.7 });
+      afterY += 14;
+    }
+    if (hs) {
+      L.write(pdfText(hs), L.left + 40, afterY, L.cw - 80, { size: 8, color: L.c.muted, align: "center" });
+      afterY += 14;
+    }
+    if (hm.length) {
+      L.write(hm.map((x) => pdfText(x)).join("  ·  "), L.left + 40, afterY, L.cw - 80, { size: 8, color: L.c.muted, align: "center" });
+      afterY += 14;
+    }
+  }
   if (b?.body) {
     const abstract = pdfText(b.body.replace(/\n+/g, " "));
     const ah = L.measure(abstract, L.cw - 120, L.f.body, 8.5, 2);
@@ -606,6 +624,24 @@ function compactHeader(L: Layout, spec: DocumentSpec, b: Block | undefined) {
   // Stunning heading font kept, but left-aligned, sentence case, not huge condensed caps
   L.write(title, L.left, L.y, L.cw, { font: L.f.heading, size: L.S(tSz), color: L.c.text, align: "left", lineGap: 1.1 });
   L.y += L.S(tSz) + L.S(6);
+  // Cover-only header: Group + members print here, never in body blocks.
+  {
+    const hg = (spec.header?.group || "").trim();
+    const hm = (spec.header?.members ?? []).filter(Boolean).slice(0, 8);
+    const hs = [(spec.header?.subject || "").trim(), (spec.header?.section || "").trim()].filter(Boolean).join(" · ");
+    if (hg) {
+      L.write(pdfText(hg).toUpperCase(), L.left, L.y, L.cw, { size: L.S(9.5), color: L.c.text, font: L.f.bold, align: "left", spacing: 0.6 });
+      L.y += L.S(6);
+    }
+    if (hs) {
+      L.write(pdfText(hs), L.left, L.y, L.cw, { size: L.S(8.5), color: L.c.muted, align: "left" });
+      L.y += L.S(6);
+    }
+    if (hm.length) {
+      L.write(hm.map((x) => pdfText(x)).join("  ·  "), L.left, L.y, L.cw, { size: L.S(8.5), color: L.c.muted, align: "left" });
+      L.y += L.S(6);
+    }
+  }
   const subtitle = pdfText(b?.subtitle || spec.subtitle || "");
   if (subtitle) {
     L.write(subtitle, L.left, L.y, L.cw, { font: L.f.italic, size: L.S(11), color: L.c.muted, align: "left", lineGap: 1.2 });

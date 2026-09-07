@@ -248,7 +248,7 @@ type Range = [number, number];
 
 /** Ordered from most specific to most generic — first match wins. */
 const DOC_CONVENTIONS: { test: RegExp; range: Range }[] = [
-  { test: /\b(business plan|research paper|thesis|dissertation|training manual|technical documentation|e-?book|handbook|textbook)\b/, range: [6, 12] },
+  { test: /\b(business plan|research paper|thesis|dissertation|action research|training manual|technical documentation|e-?book|handbook|textbook)\b/, range: [6, 12] },
   { test: /\b(resume|cv|curriculum vitae)\b/, range: [1, 1] },
   { test: /\b(cover letter|letter|recommendation|reference)\b/, range: [1, 1] },
   {
@@ -256,12 +256,14 @@ const DOC_CONVENTIONS: { test: RegExp; range: Range }[] = [
     range: [1, 1],
   },
   {
-    test: /\b(lesson plan|brief(ing)?|policy (brief|summary)|product sheet|data ?sheet|case study|syllabus|meeting (notes|minutes)|minutes|sop|standard operating procedure|newsletter|script|study notes|notes|summary|overview|profile|pitch|proposal letter|reviewer)\b/,
+    test: /\b(lesson plan|brief(ing)?|policy (brief|summary)|product sheet|data ?sheet|meeting (notes|minutes)|minutes|sop|standard operating procedure|newsletter|script|study notes|notes|summary|overview|profile|pitch|proposal letter|reviewer)\b/,
     range: [1, 2],
   },
-  { test: /\b(essay|article|blog|study guide|book report|review|reflection|op-ed|editorial|tutorial|how-to|guide|explainer|lecture notes|worksheet packet|assignment|homework)\b/, range: [2, 4] },
+  { test: /\b(essay|article|blog|study guide|book report|review|reflection|narrative|op-ed|editorial|tutorial|how-to|guide|explainer|lecture notes|worksheet packet|assignment|homework|position paper|syllabus)\b/, range: [2, 4] },
   // Specific school formats first (generic "report"/"paper" below would overclaim them).
   { test: /\b(reaction paper)\b/, range: [1, 2] },
+  { test: /\b(talumpati|news|balita|poem|tula|activity|performance task|gawain|tos|table of specifications)\b/, range: [1, 2] },
+  { test: /\b(case study)\b/, range: [3, 6] },
   { test: /\b(lab report|experiment report|investigatory( project)?)\b/, range: [2, 4] },
   { test: /\b(report|proposal|white ?paper|whitepaper|analysis|plan|playbook|grant|literature review|assessment|evaluation|strategy|manual|curriculum|specification|spec|policy|paper|research)\b/, range: [3, 6] },
 ];
@@ -287,7 +289,7 @@ export function suggestedPages(docType: string, format: Format): number {
 }
 
 /** Document types that never end with a conclusion section. */
-const NO_CONCLUSION = /\b(resume|cv|curriculum|letter|memo|one[- ]?pager|fact ?sheet|flyer|checklist|agenda|quiz|worksheet|recipe|invoice|schedule|itinerary|job description|faq|syllabus|minutes|notes|cheat|sheet|form|menu|program|rubric|template)\b/;
+const NO_CONCLUSION = /\b(resume|cv|curriculum|letter|memo|one[- ]?pager|fact ?sheet|flyer|checklist|agenda|quiz|worksheet|recipe|invoice|schedule|itinerary|job description|faq|syllabus|minutes|notes|cheat|sheet|form|menu|program|rubric|tos|template|activity|reflection|announcement|certificate)\b/;
 
 /* ------------------------------------------------------------------ */
 /*  Outline normalization                                               */
@@ -296,6 +298,7 @@ const NO_CONCLUSION = /\b(resume|cv|curriculum|letter|memo|one[- ]?pager|fact ?s
 type RawOutline = {
   title: string;
   subtitle?: string;
+  header?: { group?: string; members?: string[] | string; subject?: string; section?: string };
   format: Format;
   docType?: string;
   purpose?: string;
@@ -311,6 +314,20 @@ type RawOutline = {
   designNotes?: string;
   suggestedLength?: number;
 };
+
+function normalizeHeader(raw: RawOutline["header"]): Outline["header"] {
+  if (!raw) return undefined;
+  const group = typeof raw.group === "string" && raw.group.trim() ? raw.group.trim().slice(0, 60) : undefined;
+  const subject = typeof raw.subject === "string" && raw.subject.trim() ? raw.subject.trim().slice(0, 60) : undefined;
+  const section = typeof raw.section === "string" && raw.section.trim() ? raw.section.trim().slice(0, 60) : undefined;
+  const list = Array.isArray(raw.members) ? raw.members : typeof raw.members === "string" ? raw.members.split(/\n+/) : [];
+  const members = list
+    .map((m) => String(m ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  if (!group && !members.length && !subject && !section) return undefined;
+  return { ...(group ? { group } : {}), ...(members.length ? { members } : {}), ...(subject ? { subject } : {}), ...(section ? { section } : {}) };
+}
 
 export function normalizeOutline(raw: RawOutline): Outline {
   const format = raw.format;
@@ -460,6 +477,7 @@ export function normalizeOutline(raw: RawOutline): Outline {
   return {
     title: cleanText(raw.title) || "Untitled",
     subtitle: raw.subtitle ? cleanText(raw.subtitle) : undefined,
+    header: normalizeHeader(raw.header),
     format,
     docType,
     purpose: raw.purpose ? cleanText(raw.purpose) : undefined,
@@ -786,6 +804,7 @@ export function designPass(outline: Outline, blocks: Block[], format: Format): D
   return {
     title: outline.title,
     subtitle: outline.subtitle,
+    header: outline.header,
     docType: outline.docType,
     purpose: outline.purpose,
     audience: outline.audience,
@@ -963,6 +982,7 @@ export function specToOutline(spec: DocumentSpec, format: Format): Outline {
   return {
     title: spec.title,
     subtitle: spec.subtitle,
+    header: spec.header,
     format,
     docType: spec.docType,
     purpose: spec.purpose,

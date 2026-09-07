@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { AIError, MISSING_KEY_MESSAGE, generateStructured, isConfigured, type ChatMessage } from "@/lib/ai/client";
 import { attachmentsToPromptText, expandSystemPrompt, outlineToPromptText } from "@/lib/ai/prompts";
+import { headerToPromptText } from "@/lib/spec/intent";
 import { fitToPages } from "@/lib/render/fit";
 import { blockFromOutlineSection, designPass, normalizeBlock, normalizeOutline, pagePlan, specWordCount } from "@/lib/spec/normalize";
 import { validateSpecForExport } from "@/lib/validate";
@@ -28,7 +29,8 @@ export async function POST(req: Request) {
   if (!parsed.success) return NextResponse.json({ error: "Outline is invalid" }, { status: 400 });
   const outline: Outline = normalizeOutline(parsed.data);
   const attachments = (body.attachments ?? []).filter((a) => a && ((a as any).isImage || a.text?.trim())).slice(0, 8);
-  const transcript = (body.transcript ?? []).filter((t) => t && typeof t.content === "string").slice(-10);
+  // Richer memory: last 16 user turns, 4000 chars each — custom requests survive truncation.
+  const transcript = (body.transcript ?? []).filter((t) => t && typeof t.content === "string").slice(-16);
 
   // Design reference assist: resolve once, pass tokens to writer (never mandate restyle).
   let designRef: { ornament?: string; bulletStyle?: string; themeId?: string; mood?: string } | undefined;
@@ -51,17 +53,26 @@ export async function POST(req: Request) {
   }
   const system = expandSystemPrompt(outline, designRef);
   const contextParts: string[] = [];
+  const headerText = headerToPromptText(outline.header);
+  if (headerText) contextParts.push(headerText);
   const brief = transcript
     .filter((t) => t.role === "user")
-    .map((t) => t.content.slice(0, 2500))
+    .map((t) => t.content.slice(0, 4000))
     .join("\n---\n");
   if (brief) contextParts.push(`Original request and answers from the user:\n${brief}`);
   if (attachments.length) contextParts.push(`Source material (primary source of facts):\n${attachmentsToPromptText(attachments, ATTACHMENT_BUDGET)}`);
   const context = contextParts.join("\n\n");
 
   const batchSize = outline.format === "pptx" ? BATCH_SIZE_DECK : BATCH_SIZE_DOC;
+  // Partial expand: only write the requested section ids (patch path). Client merges
+  // into the existing spec, so skip designPass/fit/topUp here — just return raw blocks.
+  const onlyIds = Array.isArray((body as { sectionIds?: unknown }).sectionIds)
+    ? new Set(((body as { sectionIds?: unknown }).sectionIds as unknown[]).map((x) => String(x)))
+    : null;
+  const targetSections = onlyIds ? outline.sections.filter((s) => onlyIds.has(s.id)) : outline.sections;
+  const effectiveSections = targetSections.length ? targetSections : outline.sections;
   const batches: OutlineSection[][] = [];
-  for (let i = 0; i < outline.sections.length; i += batchSize) batches.push(outline.sections.slice(i, i + batchSize));
+  for (let i = 0; i < effectiveSections.length; i += batchSize) batches.push(effectiveSections.slice(i, i + batchSize));
 
   if (wantsStream) {
     const stream = new ReadableStream({
@@ -95,7 +106,7 @@ export async function POST(req: Request) {
             throw new AIError(`The writer could not produce content (${failures[0]})`, 502);
           }
           let finalBlocks = allBlocks;
-          if (!failures.length) {
+          if (!failures.length && !onlyIds) {
             const top = await topUpIfShort(system, context, outline, allBlocks);
             finalBlocks = top.blocks;
             if (top.toppedUp) {
@@ -105,15 +116,20 @@ export async function POST(req: Request) {
               if (top.warning) failures.push(top.warning);
             }
           }
-          let spec = designPass(outline, finalBlocks, outline.format);
-          if (outline.format !== "pptx") spec = await fitToPages(spec);
-          // Hybrid QA: deterministic validate-style checks appended as warnings (never block).
-          try {
-            failures.push(...validateSpecForExport(spec, outline).slice(0, 4));
-          } catch {
-            // QA must never break generation.
+          if (onlyIds) {
+            // Partial path: return raw blocks only — client merges into existing spec.
+            send({ type: "done", spec: null, blocks: finalBlocks, partial: true, warnings: failures, fit: null });
+          } else {
+            let spec = designPass(outline, finalBlocks, outline.format);
+            if (outline.format !== "pptx") spec = await fitToPages(spec);
+            // Hybrid QA: deterministic validate-style checks appended as warnings (never block).
+            try {
+              failures.push(...validateSpecForExport(spec, outline).slice(0, 4));
+            } catch {
+              // QA must never break generation.
+            }
+            send({ type: "done", spec, warnings: failures, fit: spec.fit ?? null });
           }
-          send({ type: "done", spec, warnings: failures, fit: spec.fit ?? null });
         } catch (err) {
           const message = err instanceof Error ? err.message : "Unexpected error";
           const stack = err instanceof Error ? err.stack : undefined;
@@ -151,6 +167,10 @@ export async function POST(req: Request) {
       throw new AIError(`The writer could not produce content (${failures[0]})`, 502);
     }
     let blocks = results.flat();
+    if (onlyIds) {
+      // Partial path: no top-up/design/fit — client merges blocks into existing spec.
+      return NextResponse.json({ blocks, partial: true, warnings: failures, fit: null });
+    }
     if (!failures.length) {
       const top = await topUpIfShort(system, context, outline, blocks);
       blocks = top.blocks;
